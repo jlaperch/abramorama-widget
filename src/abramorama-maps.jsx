@@ -716,19 +716,25 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
   const [geoLoading, setGeoL]   = useState(false);
   const [loading, setLoading]   = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const [sheetError, setSheetError] = useState(null);
   const film = FILM_SHEETS[fi];
 
   useEffect(()=>{
     let cancelled=false;
     (async()=>{
-      setLoading(true); setScreenings([]);
+      setLoading(true); setScreenings([]); setSheetError(null);
       let rows;
       if(demoMode()){
         rows=[...DEMO];
       } else {
-        // Widget has no token — uses public API key read. Admin uses OAuth token read.
-        try{ rows=await readScreenings(token,film.sheetId); }
-        catch(e){ console.error("Sheet read failed:",e); rows=[]; }
+        try{
+          rows=await readScreenings(token,film.sheetId);
+          if(rows.length===0) setSheetError("Sheet returned 0 rows — check the Screenings tab has data.");
+        } catch(e){
+          console.error("Sheet read failed:",e);
+          setSheetError(`Sheet read failed: ${e.message}. Check API key restrictions and Sheet sharing settings.`);
+          rows=[];
+        }
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
@@ -783,8 +789,34 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
       )}
 
       <div className="wwrap">
+        {sheetError && (
+          <div style={{
+            background:"#fef2f2",border:"1px solid #fca5a5",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#991b1b",
+            letterSpacing:".1em",lineHeight:1.7,
+          }}>
+            <strong>⚠ Sheet Error:</strong> {sheetError}
+          </div>
+        )}
         <div className="wt">{film.title}</div>
         <div className="wtag">Now Playing · Select Theaters</div>
+        {/* Debug panel — visible only when ?debug=1 is in the URL */}
+        {typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1" && (
+          <div style={{
+            background:"#0d0d0d",border:"1px solid #333",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#4caf76",
+            letterSpacing:".08em",lineHeight:2,
+          }}>
+            <div style={{color:"#b8942a",marginBottom:6,letterSpacing:".15em"}}>⚙ DEBUG INFO</div>
+            <div>Film: <span style={{color:"white"}}>{film.title}</span></div>
+            <div>Sheet ID: <span style={{color:"white"}}>{film.sheetId}</span></div>
+            <div>Token: <span style={{color:"white"}}>{token ? "✓ OAuth signed in" : "None (using API key)"}</span></div>
+            <div>Screenings loaded: <span style={{color:"white"}}>{screenings.length}</span></div>
+            <div>Demo mode: <span style={{color:"white"}}>{demoMode() ? "YES — replace placeholder keys" : "No"}</span></div>
+            <div>Sheet URL: <a href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Open Sheet ↗</a></div>
+            <div>API test: <a href={`https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Test API call ↗</a></div>
+          </div>
+        )}
 
         <div className="wf">
           <label>From</label>
