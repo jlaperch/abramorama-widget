@@ -1,0 +1,1034 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIG — replace these before deploying
+// ─────────────────────────────────────────────────────────────────────────────
+const GOOGLE_CLIENT_ID  = "945891790401-fb328mkkbjmgvimscf2gj8jh6qjpjpff.apps.googleusercontent.com";
+const GOOGLE_MAPS_KEY   = "AIzaSyDzg5YYRxCwyci5DFVXLrUbOPLZQo_H8cM";
+
+const FILM_SHEETS = [
+  { id:"film_1", title:"Eraserheads", sheetId:"1zDOAA46yeaGH31gQMorBoXcSlI1y251beqV8Cn45Kuw" },
+  { id:"film_2", title:"Just Sing",   sheetId:"1rZ-PO41AIJGgQyJApiN1yHgEFyDcpkW3LxBS_IThtUA" },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// URL PARAM HELPERS  (?film=film_2&mode=widget  or  ?mode=admin)
+// ─────────────────────────────────────────────────────────────────────────────
+const _params       = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+const URL_FILM_ID   = _params.get("film");   // e.g. "film_2"
+const URL_MODE      = _params.get("mode");   // "admin" | "widget" | null
+const URL_FILM_IDX  = Math.max(0, FILM_SHEETS.findIndex(f => f.id === URL_FILM_ID));
+
+// Post height to parent so Squarespace iframe auto-resizes
+function postHeight() {
+  try { window.parent.postMessage({ type:"abramorama-height", height:document.body.scrollHeight }, "*"); } catch{}
+}
+
+const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly";
+const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
+const DATA_RANGE  = "Screenings!A2:E";
+const HDR_RANGE   = "Screenings!A1:E1";
+const HDR_VALUES  = [["Theater","Address","Start Date","End Date","Ticket URL"]];
+
+// Demo data shown before real credentials are wired up
+const DEMO = [
+  { id:"d1", theater:"IFC Center",        address:"323 Sixth Ave, New York, NY 10014",              startDate:"2026-04-04", endDate:"2026-04-17", ticketUrl:"https://ifccenter.com",         lat:40.7308,  lng:-74.0014,  _rowIndex:1 },
+  { id:"d2", theater:"Laemmle Royal",     address:"11523 Santa Monica Blvd, Los Angeles, CA 90025", startDate:"2026-04-11", endDate:"2026-04-24", ticketUrl:"https://laemmle.com",           lat:34.0499,  lng:-118.4481, _rowIndex:2 },
+  { id:"d3", theater:"Music Box Theatre", address:"3733 N Southport Ave, Chicago, IL 60613",        startDate:"2026-04-18", endDate:"2026-05-01", ticketUrl:"https://musicboxtheatre.com",   lat:41.9494,  lng:-87.6634,  _rowIndex:3 },
+  { id:"d4", theater:"SIFF Cinema Uptown",address:"511 Queen Anne Ave N, Seattle, WA 98109",        startDate:"2026-04-25", endDate:"2026-05-08", ticketUrl:"https://siff.net",              lat:47.6230,  lng:-122.3565, _rowIndex:4 },
+  { id:"d5", theater:"Alamo Drafthouse",  address:"320 E 3rd St, Austin, TX 78701",                 startDate:"2026-05-02", endDate:"2026-05-15", ticketUrl:"https://drafthouse.com",        lat:30.2626,  lng:-97.7404,  _rowIndex:5 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STYLES
+// ─────────────────────────────────────────────────────────────────────────────
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#0d0d0d;--paper:#f5f0e8;--cream:#ede8dc;
+  --gold:#b8942a;--gold-l:#d4af5a;--red:#8b1a1a;
+  --green:#4caf76;--blue:#1a6ef5;
+  --muted:#7a7468;--border:#c8c0b0;
+  --mono:'DM Mono',monospace;--serif:'Cormorant Garamond',Georgia,serif;
+}
+body{background:var(--ink);font-family:var(--serif)}
+
+/* SHELL */
+.shell{min-height:100vh;background:var(--ink);color:var(--paper);overflow-x:hidden;position:relative}
+.shell::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.05'/%3E%3C/svg%3E");pointer-events:none;z-index:998;opacity:.55}
+
+/* NAV */
+.nav{display:flex;align-items:center;justify-content:space-between;padding:16px 36px;border-bottom:1px solid rgba(200,192,176,.18);position:sticky;top:0;background:rgba(13,13,13,.95);backdrop-filter:blur(16px);z-index:200;gap:14px;flex-wrap:wrap}
+.brand{font-family:var(--mono);font-size:11px;letter-spacing:.32em;color:var(--gold);text-transform:uppercase;white-space:nowrap}
+.nav-r{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tabs{display:flex;border:1px solid rgba(200,192,176,.28)}
+.tab{padding:8px 20px;background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;cursor:pointer;transition:all .18s}
+.tab.on{background:var(--gold);color:var(--ink)}
+.tab:hover:not(.on){background:rgba(184,148,42,.1);color:var(--paper)}
+.auth-btn{display:flex;align-items:center;gap:7px;padding:7px 14px;border:1px solid rgba(200,192,176,.28);background:transparent;color:var(--paper);font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;transition:all .18s;white-space:nowrap}
+.auth-btn:hover{border-color:var(--gold);color:var(--gold)}
+.auth-btn.on{border-color:rgba(76,175,118,.5);color:var(--green);cursor:default}
+.auth-btn.sm{font-size:9px;padding:6px 11px}
+.adot{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}
+
+/* MAIN */
+.main{padding:0 36px 80px;max-width:1140px;margin:0 auto}
+.ph{padding:44px 0 28px;border-bottom:1px solid rgba(200,192,176,.14);margin-bottom:32px}
+.ph h1{font-family:var(--serif);font-size:clamp(2rem,4.5vw,3.2rem);font-weight:300;font-style:italic;line-height:1.1}
+.ph h1 em{color:var(--gold);font-style:normal}
+.ph-sub{margin-top:7px;font-family:var(--mono);font-size:10px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase}
+
+/* SETUP BANNER */
+.sbanner{border:1px solid rgba(184,148,42,.38);background:rgba(184,148,42,.055);padding:18px 22px;margin-bottom:24px}
+.sbanner h4{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--gold);margin-bottom:9px}
+.sbanner ol{padding-left:17px}
+.sbanner li{font-family:var(--mono);font-size:10px;color:rgba(245,240,232,.68);line-height:2}
+.sbanner code{background:rgba(255,255,255,.08);padding:1px 5px;font-size:9px}
+.dismiss{margin-top:12px;background:transparent;border:1px solid rgba(200,192,176,.28);color:var(--muted);font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;padding:5px 12px;cursor:pointer}
+.dismiss:hover{color:var(--paper)}
+
+/* FILM ROW */
+.film-row{display:flex;align-items:center;gap:12px;margin-bottom:24px;flex-wrap:wrap}
+.flbl{font-family:var(--mono);font-size:10px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase;white-space:nowrap}
+.fsel{background:rgba(255,255,255,.04);border:1px solid rgba(200,192,176,.28);color:var(--paper);font-family:var(--serif);font-size:15px;padding:9px 13px;flex:1;min-width:180px;appearance:none;cursor:pointer}
+.fsel option{background:#1a1a1a}
+
+/* BTN */
+.btn{padding:9px 20px;font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;border:none;cursor:pointer;transition:all .18s;white-space:nowrap}
+.btn-g{background:var(--gold);color:var(--ink)}
+.btn-g:hover{background:var(--gold-l)}
+.btn-o{background:transparent;border:1px solid rgba(200,192,176,.38);color:var(--paper)}
+.btn-o:hover{border-color:var(--gold);color:var(--gold)}
+.btn-d{background:transparent;border:1px solid rgba(139,26,26,.5);color:#c0392b;padding:5px 12px;font-size:9px}
+.btn-d:hover{background:rgba(139,26,26,.14)}
+.btn:disabled{opacity:.38;cursor:not-allowed}
+
+/* SYNC ROW */
+.sync-row{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.sbadge{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--muted);display:flex;align-items:center;gap:5px}
+.sbadge.ok{color:var(--green)}.sbadge.err{color:#e74c3c}
+
+/* FORM CARD */
+.fc{border:1px solid rgba(200,192,176,.18);background:rgba(255,255,255,.02);padding:26px;margin-bottom:24px;animation:fs .2s ease}
+@keyframes fs{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+.fc h3{font-family:var(--serif);font-size:1rem;font-weight:300;font-style:italic;color:var(--gold);margin-bottom:18px}
+.fg{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.fg .full{grid-column:1/-1}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-family:var(--mono);font-size:9px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase}
+.field input{background:rgba(255,255,255,.04);border:1px solid rgba(200,192,176,.22);color:var(--paper);font-family:var(--serif);font-size:15px;padding:8px 12px;outline:none;transition:border-color .18s;width:100%}
+.field input:focus{border-color:var(--gold)}
+.field input::placeholder{color:rgba(200,192,176,.28)}
+.fa{display:flex;gap:9px;margin-top:16px;justify-content:flex-end}
+
+/* TABLE */
+.slbl{font-family:var(--mono);font-size:10px;letter-spacing:.25em;color:var(--muted);text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+.slbl::after{content:'';flex:1;height:1px;background:rgba(200,192,176,.13)}
+.tbl{display:flex;flex-direction:column;gap:1px}
+.tr{display:grid;grid-template-columns:1.7fr 1.4fr 1fr 1fr auto;gap:12px;align-items:center;padding:13px 16px;background:rgba(255,255,255,.02);border:1px solid rgba(200,192,176,.09);transition:background .14s}
+.tr:hover{background:rgba(255,255,255,.042)}
+.tr.hdr{background:transparent;border-color:transparent;padding-bottom:5px}
+.tr.hdr span{font-family:var(--mono);font-size:9px;letter-spacing:.18em;color:var(--muted);text-transform:uppercase}
+.tn{font-family:var(--serif);font-size:15px;color:var(--paper)}
+.ta{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.td{font-family:var(--mono);font-size:11px;color:var(--paper)}
+.tl{font-family:var(--mono);font-size:10px;color:var(--gold);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;max-width:155px}
+.tl:hover{color:var(--gold-l);text-decoration:underline}
+.sd{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+.sd.active{background:var(--green)}.sd.upcoming{background:var(--gold)}.sd.ended{background:var(--muted)}
+
+/* EMPTY */
+.empty{text-align:center;padding:72px 20px;color:var(--muted)}
+.empty .big{font-family:var(--serif);font-size:5rem;font-weight:300;font-style:italic;opacity:.1;line-height:1;margin-bottom:12px}
+.empty p{font-family:var(--mono);font-size:11px;letter-spacing:.15em;text-transform:uppercase}
+
+/* ── WIDGET ── */
+.wwrap{border:1px solid rgba(200,192,176,.18);background:var(--paper);color:var(--ink);padding:28px;margin-top:18px}
+.wt{font-family:var(--serif);font-size:2.1rem;font-weight:300;font-style:italic;color:var(--ink);margin-bottom:3px}
+.wtag{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);margin-bottom:22px}
+.wf{display:flex;align-items:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+.wf label{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.wf input{border:1px solid var(--border);background:white;color:var(--ink);font-family:var(--mono);font-size:11px;padding:6px 10px;outline:none}
+.wf input:focus{border-color:var(--gold)}
+.geo-btn{margin-left:auto;background:var(--ink);color:var(--paper);border:none;padding:8px 16px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .18s}
+.geo-btn:hover{background:var(--gold);color:var(--ink)}
+.geo-btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* MAP CONTAINER */
+.map-wrap{position:relative;margin-bottom:20px}
+.map-el{width:100%;height:380px;border:1px solid var(--border)}
+.map-key-note{margin-top:6px;font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.1em}
+
+/* CARDS */
+.wcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:1px;background:var(--border)}
+.wcard{background:white;padding:15px;position:relative}
+.wcn{font-family:var(--serif);font-size:15px;font-weight:600;color:var(--ink);margin-bottom:3px}
+.wca{font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;line-height:1.55}
+.wcd{font-family:var(--mono);font-size:10px;color:var(--ink);margin-bottom:9px;padding:5px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.wcdist{font-family:var(--mono);font-size:9px;color:var(--gold);margin-bottom:8px}
+.wctkt{display:inline-block;background:var(--ink);color:white;font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;padding:6px 13px;text-decoration:none;transition:background .15s}
+.wctkt:hover{background:var(--gold)}
+.nbadge{position:absolute;top:10px;right:10px;background:var(--gold);color:var(--ink);font-family:var(--mono);font-size:8px;letter-spacing:.1em;padding:2px 7px;text-transform:uppercase}
+
+/* TOAST */
+.toast{position:fixed;bottom:26px;right:26px;background:var(--gold);color:var(--ink);font-family:var(--mono);font-size:11px;letter-spacing:.11em;padding:10px 17px;z-index:9999;animation:ti .18s ease;max-width:300px;line-height:1.4}
+.toast.err{background:#c0392b;color:white}
+@keyframes ti{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* LOADING OVERLAY on map */
+.map-loading{position:absolute;inset:0;background:rgba(232,228,220,.82);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);z-index:10;border:1px solid var(--border)}
+.spin{animation:spin .7s linear infinite;display:inline-block;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media(max-width:660px){
+  .nav,.main{padding-left:16px;padding-right:16px}
+  .fg{grid-template-columns:1fr}.fg .full{grid-column:1}
+  .tr{grid-template-columns:1fr;gap:3px}.tr.hdr{display:none}
+  .map-el{height:260px}
+}
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const fmtDate = d => { if(!d) return "—"; const [,m,day]=d.split("-"); return `${MONTHS[+m-1]} ${+day}`; };
+const status  = s => { const t=new Date().toISOString().slice(0,10); return s.endDate<t?"ended":s.startDate>t?"upcoming":"active"; };
+const haversineKm = (a,b,c,d) => { const R=6371,dL=(c-a)*Math.PI/180,dG=(d-b)*Math.PI/180,x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dG/2)**2; return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)); };
+const milesAway   = (a,b,c,d) => (haversineKm(a,b,c,d)*0.621371).toFixed(1);
+const demoMode    = () => GOOGLE_CLIENT_ID.startsWith("YOUR_") || GOOGLE_MAPS_KEY.startsWith("YOUR_");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE MAPS LOADER
+// ─────────────────────────────────────────────────────────────────────────────
+let mapsPromise = null;
+function loadMaps() {
+  if (mapsPromise) return mapsPromise;
+  if (demoMode()) { mapsPromise = Promise.reject(new Error("demo")); return mapsPromise; }
+  mapsPromise = new Promise((resolve, reject) => {
+    if (window.google?.maps) { resolve(window.google.maps); return; }
+    const cb = `_gmInit_${Date.now()}`;
+    window[cb] = () => { resolve(window.google.maps); delete window[cb]; };
+    const s = document.createElement("script");
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&callback=${cb}&libraries=marker`;
+    s.async = true;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  return mapsPromise;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GEOCODING  (Google Geocoding API, falls back to Nominatim in demo)
+// ─────────────────────────────────────────────────────────────────────────────
+const geocache = {};
+async function geocodeAddress(address) {
+  if (geocache[address]) return geocache[address];
+  if (demoMode()) {
+    // Nominatim fallback
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
+      { headers:{"Accept-Language":"en"} });
+    const d = await r.json();
+    if (!d.length) return null;
+    const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
+    geocache[address] = g; return g;
+  }
+  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
+  const d = await r.json();
+  if (d.status !== "OK") return null;
+  const { lat, lng } = d.results[0].geometry.location;
+  const g = { lat, lng }; geocache[address]=g; return g;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHEETS API
+// ─────────────────────────────────────────────────────────────────────────────
+async function sheetsGet(token, sheetId, range) {
+  const r = await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(range)}`,
+    { headers:{Authorization:`Bearer ${token}`} });
+  if(!r.ok) throw new Error(`GET ${r.status}`);
+  return r.json();
+}
+async function sheetsAppend(token, sheetId, range, values) {
+  const r = await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    { method:"POST", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values}) });
+  if(!r.ok) throw new Error(`APPEND ${r.status}`);
+  return r.json();
+}
+async function sheetsDelete(token, sheetId, tabGid, rowIndex) {
+  const r = await fetch(`${SHEETS_BASE}/${sheetId}:batchUpdate`,
+    { method:"POST", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+      body:JSON.stringify({ requests:[{ deleteDimension:{ range:{ sheetId:tabGid, dimension:"ROWS", startIndex:rowIndex, endIndex:rowIndex+1 } } }] }) });
+  if(!r.ok) throw new Error(`DELETE ${r.status}`);
+  return r.json();
+}
+async function ensureHeader(token, sheetId) {
+  const d = await sheetsGet(token, sheetId, HDR_RANGE);
+  if(d.values?.[0]?.[0]==="Theater") return;
+  await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`,
+    { method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values:HDR_VALUES}) });
+}
+// Public read — no auth, uses Google Sheets JSON feed (CORS-safe)
+async function readScreeningsPublic(sheetId) {
+  // Use the Sheets API with API key — public sheets work without OAuth
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`;
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
+  const d = await r.json();
+  if(!d.values) return [];
+  return d.values.map((row, i) => ({
+    _rowIndex: i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+    lat:null, lng:null,
+  })).filter(r=>r.theater);
+}
+
+async function readScreenings(token, sheetId) {
+  if(!token) return readScreeningsPublic(sheetId);
+  const d = await sheetsGet(token, sheetId, DATA_RANGE);
+  if(!d.values) return [];
+  return d.values.map((row,i) => ({
+    _rowIndex:i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+    lat:null, lng:null,
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE AUTH HOOK
+// ─────────────────────────────────────────────────────────────────────────────
+function useGoogleAuth() {
+  const [token, setToken] = useState(null);
+  const [user, setUser]   = useState(null);
+  const [loading, setLoading] = useState(false);
+  const clientRef = useRef(null);
+
+  const initClient = useCallback(() => new Promise((resolve, reject) => {
+    if(!window.google) { reject(new Error("GIS not loaded")); return; }
+    clientRef.current = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: SCOPES,
+      callback: async resp => {
+        if(resp.error) { reject(resp.error); return; }
+        setToken(resp.access_token);
+        try {
+          const ui = await fetch("https://www.googleapis.com/oauth2/v3/userinfo",
+            { headers:{Authorization:`Bearer ${resp.access_token}`} });
+          setUser(await ui.json());
+        } catch{}
+        resolve(resp.access_token);
+      },
+    });
+    resolve(null);
+  }), []);
+
+  const signIn  = useCallback(async () => {
+    setLoading(true);
+    try { if(!clientRef.current) await initClient(); clientRef.current.requestAccessToken(); }
+    catch(e){ console.error(e); }
+    finally { setLoading(false); }
+  }, [initClient]);
+
+  const signOut = useCallback(() => {
+    if(token) window.google?.accounts.oauth2.revoke(token);
+    setToken(null); setUser(null);
+  }, [token]);
+
+  useEffect(() => {
+    if(demoMode()) return;
+    if(document.getElementById("gis")) { initClient(); return; }
+    const s = document.createElement("script");
+    s.id="gis"; s.src="https://accounts.google.com/gsi/client"; s.async=true;
+    s.onload = () => initClient();
+    document.head.appendChild(s);
+  }, [initClient]);
+
+  return { token, user, loading, signIn, signOut };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE MAP COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
+function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
+  const mapRef    = useRef(null);
+  const mapObj    = useRef(null);
+  const markers   = useRef([]);
+  const infoRef   = useRef(null);
+  const [mapErr,  setMapErr]  = useState(false);
+  const [mapLoad, setMapLoad] = useState(true);
+
+  // Init map
+  useEffect(() => {
+    loadMaps()
+      .then(maps => {
+        if(!mapRef.current) return;
+        mapObj.current = new maps.Map(mapRef.current, {
+          center: { lat:39.5, lng:-98.35 },
+          zoom: 4,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          styles: [
+            { featureType:"all", elementType:"labels.text.fill", stylers:[{color:"#4a4037"}] },
+            { featureType:"water", elementType:"geometry", stylers:[{color:"#c9d8e8"}] },
+            { featureType:"landscape", elementType:"geometry", stylers:[{color:"#f0ece0"}] },
+            { featureType:"road", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"road.highway", elementType:"geometry", stylers:[{color:"#c8b89a"}] },
+            { featureType:"poi", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"transit", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"administrative", elementType:"geometry.stroke", stylers:[{color:"#c0b498"}] },
+          ],
+        });
+        infoRef.current = new maps.InfoWindow();
+        setMapLoad(false);
+      })
+      .catch(() => { setMapErr(true); setMapLoad(false); });
+  }, []);
+
+  // Sync markers whenever screenings change
+  useEffect(() => {
+    if(!mapObj.current || !window.google?.maps) return;
+    const maps = window.google.maps;
+
+    // Clear old markers
+    markers.current.forEach(m => m.setMap(null));
+    markers.current = [];
+
+    const placed = screenings.filter(s => s.lat && s.lng);
+    placed.forEach(s => {
+      const isNear = userPos && parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)) < 80;
+      const marker = new maps.Marker({
+        position: { lat:s.lat, lng:s.lng },
+        map: mapObj.current,
+        title: s.theater,
+        icon: {
+          path: maps.SymbolPath.CIRCLE,
+          scale: activeId===s.id ? 12 : 9,
+          fillColor: isNear ? "#b8942a" : "#8b1a1a",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2,
+        },
+        animation: activeId===s.id ? maps.Animation.BOUNCE : null,
+        zIndex: activeId===s.id ? 10 : 1,
+      });
+      marker.addListener("click", () => {
+        infoRef.current.setContent(`
+          <div style="font-family:'DM Mono',monospace;padding:6px 2px;min-width:180px">
+            <div style="font-family:'Cormorant Garamond',serif;font-size:16px;font-weight:600;margin-bottom:4px">${s.theater}</div>
+            <div style="font-size:10px;color:#7a7468;margin-bottom:8px;line-height:1.5">${s.address}</div>
+            <div style="font-size:10px;color:#333;margin-bottom:10px;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:5px 0">
+              ${fmtDate(s.startDate)} – ${fmtDate(s.endDate)}
+            </div>
+            ${userPos && s.lat ? `<div style="font-size:9px;color:#b8942a;margin-bottom:8px">📍 ${milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>` : ""}
+            <a href="${s.ticketUrl}" target="_blank" style="display:inline-block;background:#0d0d0d;color:white;font-size:9px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;text-decoration:none">Get Tickets →</a>
+          </div>
+        `);
+        infoRef.current.open(mapObj.current, marker);
+        onMarkerClick(s.id);
+      });
+      markers.current.push(marker);
+    });
+
+    // Fit bounds
+    if(placed.length > 0) {
+      const bounds = new maps.LatLngBounds();
+      placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
+      if(userPos) bounds.extend(userPos);
+      mapObj.current.fitBounds(bounds, 60);
+      if(placed.length===1) mapObj.current.setZoom(12);
+    }
+  }, [screenings, userPos, activeId]);
+
+  // User position marker
+  const userMarkerRef = useRef(null);
+  useEffect(() => {
+    if(!mapObj.current || !window.google?.maps || !userPos) return;
+    if(userMarkerRef.current) userMarkerRef.current.setMap(null);
+    userMarkerRef.current = new window.google.maps.Marker({
+      position: userPos,
+      map: mapObj.current,
+      title: "Your location",
+      icon: {
+        path: window.google.maps.SymbolPath.CIRCLE,
+        scale: 8,
+        fillColor: "#1a6ef5",
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+      },
+      zIndex: 20,
+    });
+  }, [userPos]);
+
+  if(mapErr) return (
+    <div className="map-el" style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,background:"#e8e4dc",border:"1px solid var(--border)"}}>
+      <div style={{fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>Map unavailable in demo mode</div>
+      <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)"}}>Add a real Maps API key to enable</div>
+    </div>
+  );
+
+  return (
+    <div className="map-wrap">
+      <div ref={mapRef} className="map-el" />
+      {mapLoad && (
+        <div className="map-loading"><span className="spin">⟳</span> Loading map…</div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC FALLBACK MAP  (shown in demo mode)
+// ─────────────────────────────────────────────────────────────────────────────
+const B = { minLat:24,maxLat:50,minLng:-125,maxLng:-66 };
+function toP(lat,lng) {
+  return {
+    x: Math.max(2,Math.min(97,((lng-B.minLng)/(B.maxLng-B.minLng))*100)),
+    y: Math.max(3,Math.min(94,((B.maxLat-lat)/(B.maxLat-B.minLat))*100)),
+  };
+}
+const US_OUTLINE = "M60,78 L88,64 L138,56 L200,50 L262,48 L322,50 L372,54 L412,60 L444,70 L464,82 L470,100 L464,120 L448,134 L426,144 L398,150 L368,154 L338,157 L308,158 L278,157 L248,153 L218,146 L188,136 L162,124 L136,110 L110,96 L84,84 Z M60,78 L42,86 L36,100 L44,114 L58,120 L72,116 L76,102 L68,90 Z M378,158 L396,174 L410,186 L418,200 L410,212 L396,216 L382,212 L372,198 L368,182 Z";
+
+function StaticMap({ screenings, userPos, activeId, onMarkerClick }) {
+  const [tooltip, setTooltip] = useState(null);
+  const filtered = screenings.filter(s=>s.lat&&s.lng);
+  return (
+    <div className="map-wrap">
+      <div className="map-el" style={{position:"relative",overflow:"hidden",background:"#eae5d8",cursor:"default"}}>
+        {/* Light topo-style background */}
+        <svg viewBox="0 0 530 300" style={{position:"absolute",inset:0,width:"100%",height:"100%"}}>
+          <rect width="530" height="300" fill="#ddd8cc"/>
+          <path d={US_OUTLINE} fill="#e8e3d4" stroke="#b8b09a" strokeWidth="1.2"/>
+        </svg>
+
+        {/* Pins */}
+        {filtered.map(s => {
+          const p = toP(s.lat,s.lng);
+          const near = userPos && parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng))<80;
+          const active = activeId===s.id;
+          return (
+            <div key={s.id}
+              onClick={()=>{ onMarkerClick(s.id); setTooltip(tooltip===s.id?null:s.id); }}
+              style={{
+                position:"absolute", left:`${p.x}%`, top:`${p.y}%`,
+                transform:`translate(-50%,-100%) scale(${active?1.2:1})`,
+                cursor:"pointer", zIndex:active?10:2, transition:"transform .15s",
+              }}>
+              <div style={{
+                width:13,height:13,borderRadius:"50% 50% 50% 0",transform:"rotate(-45deg)",
+                background:near?"#b8942a":"#8b1a1a",border:"2px solid white",
+                boxShadow:"0 2px 6px rgba(0,0,0,.32)",
+              }}/>
+              {tooltip===s.id && (
+                <div style={{
+                  position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",
+                  background:"#0d0d0d",color:"white",fontFamily:"var(--mono)",fontSize:9,
+                  padding:"6px 10px",whiteSpace:"nowrap",zIndex:20,letterSpacing:".1em",
+                  boxShadow:"0 4px 16px rgba(0,0,0,.4)",
+                }}>
+                  <div style={{fontFamily:"var(--serif)",fontSize:13,marginBottom:3}}>{s.theater}</div>
+                  <div style={{color:"#b8942a",marginBottom:4}}>{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
+                  {near && <div style={{color:"#b8942a",marginBottom:4}}>📍 {milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>}
+                  <a href={s.ticketUrl} target="_blank" rel="noreferrer"
+                    style={{color:"#d4af5a",textDecoration:"none",fontSize:9,letterSpacing:".12em",textTransform:"uppercase"}}>
+                    Get Tickets →
+                  </a>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* User dot */}
+        {userPos && (() => {
+          const p = toP(userPos.lat,userPos.lng);
+          return (
+            <div style={{position:"absolute",left:`${p.x}%`,top:`${p.y}%`,transform:"translate(-50%,-50%)",zIndex:15}}>
+              <div style={{width:10,height:10,borderRadius:"50%",background:"#1a6ef5",border:"2px solid white",boxShadow:"0 0 0 4px rgba(26,110,245,.22)"}}/>
+            </div>
+          );
+        })()}
+
+        {/* Legend */}
+        <div style={{position:"absolute",bottom:8,right:10,fontFamily:"var(--mono)",fontSize:8,color:"#8a8278",letterSpacing:".08em",lineHeight:1.8}}>
+          <span style={{color:"#b8942a"}}>●</span> Near you &nbsp;<span style={{color:"#8b1a1a"}}>●</span> Other
+        </div>
+        <div style={{position:"absolute",bottom:8,left:10,fontFamily:"var(--mono)",fontSize:8,color:"#8a8278",letterSpacing:".08em"}}>
+          Demo map — click pins for details
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPONENTS
+// ─────────────────────────────────────────────────────────────────────────────
+function Toast({ msg, isErr, onDone }) {
+  useEffect(() => { const t=setTimeout(onDone,3000); return ()=>clearTimeout(t); },[]);
+  return <div className={`toast${isErr?" err":""}`}>{msg}</div>;
+}
+
+function SetupBanner() {
+  const [gone, setGone] = useState(false);
+  if(gone) return null;
+  return (
+    <div className="sbanner">
+      <h4>⚙ One-time setup — replace placeholder keys in the file header</h4>
+      <ol>
+        <li>Google Cloud Console → enable <code>Maps JavaScript API</code>, <code>Geocoding API</code>, <code>Sheets API</code>, <code>Drive API</code></li>
+        <li>Create an API key → replace <code>GOOGLE_MAPS_KEY</code></li>
+        <li>Create OAuth 2.0 credentials → replace <code>GOOGLE_CLIENT_ID</code></li>
+        <li>Create one Sheet per film with a tab named <code>Screenings</code> → replace each <code>YOUR_SHEET_ID_*</code></li>
+        <li>Add the Squarespace domain to <em>Authorized JavaScript Origins</em></li>
+      </ol>
+      <button className="dismiss" onClick={()=>setGone(true)}>Got it — dismiss</button>
+    </div>
+  );
+}
+
+function AddForm({ onSave, onCancel, saving }) {
+  const [f,setF] = useState({theater:"",address:"",startDate:"",endDate:"",ticketUrl:""});
+  const set = (k,v)=>setF(p=>({...p,[k]:v}));
+  const ok = f.theater&&f.address&&f.startDate&&f.endDate&&f.ticketUrl;
+  return (
+    <div className="fc">
+      <h3>New Screening</h3>
+      <div className="fg">
+        <div className="field"><label>Theater Name</label><input placeholder="e.g. IFC Center" value={f.theater} onChange={e=>set("theater",e.target.value)}/></div>
+        <div className="field"><label>Address or ZIP</label><input placeholder="Full address or ZIP code" value={f.address} onChange={e=>set("address",e.target.value)}/></div>
+        <div className="field"><label>Start Date</label><input type="date" value={f.startDate} onChange={e=>set("startDate",e.target.value)}/></div>
+        <div className="field"><label>End Date</label><input type="date" value={f.endDate} onChange={e=>set("endDate",e.target.value)}/></div>
+        <div className="field full"><label>Ticket Purchase URL</label><input placeholder="https://..." value={f.ticketUrl} onChange={e=>set("ticketUrl",e.target.value)}/></div>
+      </div>
+      <div className="fa">
+        <button className="btn btn-o" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-g" disabled={!ok||saving} onClick={()=>onSave(f)}>{saving?"Saving…":"Save to Sheet"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function AdminView({ token, toast }) {
+  const [fi, setFi]         = useState(0);
+  const [rows, setRows]     = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [sync, setSync]     = useState(null);
+  const [syncErr, setSyncErr] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const film = FILM_SHEETS[fi];
+
+  const load = useCallback(async()=>{
+    if(demoMode()||!token) { setRows(DEMO.slice(0,3)); setSync("Demo data — connect Google to sync"); return; }
+    setLoading(true); setSync("Syncing…"); setSyncErr(false);
+    try {
+      await ensureHeader(token,film.sheetId);
+      const r = await readScreenings(token,film.sheetId);
+      setRows(r); setSync(`Synced ${r.length} screening${r.length!==1?"s":""}`);
+    } catch(e){ setSync("Sync failed"); setSyncErr(true); toast("Could not read Sheet.",true); }
+    finally { setLoading(false); }
+  },[token,fi]);
+
+  useEffect(()=>{ load(); },[load]);
+
+  const handleSave = async fd => {
+    if(demoMode()||!token){
+      setRows(p=>[...p,{...fd,id:`dm${Date.now()}`,_rowIndex:p.length+1}]);
+      setShowForm(false); toast("Added (demo — connect Google to persist)"); return;
+    }
+    setSaving(true);
+    try {
+      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.startDate,fd.endDate,fd.ticketUrl]]);
+      await load(); setShowForm(false); toast("Saved to Google Sheets ✓");
+    } catch{ toast("Save failed — check permissions.",true); }
+    finally { setSaving(false); }
+  };
+
+  const handleDelete = async s => {
+    if(demoMode()||!token){ setRows(p=>p.filter(x=>x.id!==s.id)); toast("Removed (demo)."); return; }
+    try {
+      const meta = await fetch(`${SHEETS_BASE}/${film.sheetId}?fields=sheets.properties`,
+        {headers:{Authorization:`Bearer ${token}`}}).then(r=>r.json());
+      const tab = meta.sheets?.find(sh=>sh.properties.title==="Screenings");
+      if(!tab) throw new Error("No Screenings tab");
+      await sheetsDelete(token,film.sheetId,tab.properties.sheetId,s._rowIndex);
+      await load(); toast("Removed from Sheet.");
+    } catch{ toast("Delete failed.",true); }
+  };
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Screening <em>Manager</em></h1>
+        <div className="ph-sub">Abramorama · Admin — {token?"Google Sheets live":"Demo mode"}</div>
+      </div>
+      <SetupBanner/>
+      <div className="film-row">
+        <span className="flbl">Film</span>
+        <select className="fsel" value={fi} onChange={e=>{setFi(+e.target.value);setShowForm(false);}}>
+          {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+        </select>
+        <button className="btn btn-g" onClick={()=>setShowForm(v=>!v)}>{showForm?"✕ Cancel":"+ Add Screening"}</button>
+        <button className="btn btn-o" onClick={load} disabled={loading}>↻ Refresh</button>
+      </div>
+      {sync && <div className="sync-row"><div className={`sbadge ${syncErr?"err":"ok"}`}><span>{syncErr?"✕":"✓"}</span><span>{sync}</span></div></div>}
+      {showForm && <AddForm onSave={handleSave} onCancel={()=>setShowForm(false)} saving={saving}/>}
+      <div className="slbl">Screenings — {film.title}</div>
+      {rows.length===0?(
+        <div className="empty"><div className="big">∅</div><p>{loading?"Loading…":"No screenings yet"}</p></div>
+      ):(
+        <div className="tbl">
+          <div className="tr hdr"><span>Theater</span><span>Address</span><span>Dates</span><span>Tickets</span><span/></div>
+          {rows.map(s=>{
+            const st=status(s);
+            return (
+              <div className="tr" key={s.id||s._rowIndex}>
+                <div><div className="tn"><span className={`sd ${st}`}/>{s.theater}</div></div>
+                <div className="ta">{s.address}</div>
+                <div className="td">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
+                <a className="tl" href={s.ticketUrl} target="_blank" rel="noreferrer">{s.ticketUrl.replace(/^https?:\/\//,"").split("/")[0]}</a>
+                <button className="btn btn-d" onClick={()=>handleDelete(s)}>Remove</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDGET VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function WidgetView({ token, toast, defaultFilmIdx=0 }) {
+  const [fi, setFi]             = useState(defaultFilmIdx);
+  const isEmbedded              = URL_MODE === "widget";
+  const [screenings, setScreenings] = useState([]);
+  const [filterStart, setFS]    = useState("");
+  const [filterEnd, setFE]      = useState("");
+  const [userPos, setUserPos]   = useState(null);
+  const [geoLoading, setGeoL]   = useState(false);
+  const [loading, setLoading]   = useState(false);
+  const [activeId, setActiveId] = useState(null);
+  const [sheetError, setSheetError] = useState(null);
+  const film = FILM_SHEETS[fi];
+
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      setLoading(true); setScreenings([]); setSheetError(null);
+      let rows;
+      if(demoMode()){
+        rows=[...DEMO];
+      } else {
+        try{
+          rows=await readScreenings(token,film.sheetId);
+          if(rows.length===0) setSheetError("Sheet returned 0 rows — check the Screenings tab has data.");
+        } catch(e){
+          console.error("Sheet read failed:",e);
+          setSheetError(`Sheet read failed: ${e.message}. Check API key restrictions and Sheet sharing settings.`);
+          rows=[];
+        }
+      }
+      if(cancelled) return;
+      setScreenings(rows); setLoading(false);
+      // Geocode each address
+      for(const s of rows){
+        if(s.lat&&s.lng) continue;
+        const g=await geocodeAddress(s.address).catch(()=>null);
+        if(!cancelled && g) setScreenings(p=>p.map(x=>x.id===s.id?{...x,...g}:x));
+        await new Promise(r=>setTimeout(r,demoMode()?320:80));
+      }
+    })();
+    return()=>{cancelled=true;};
+  },[token,fi]);
+
+  const filtered = screenings.filter(s=>{
+    if(filterStart && s.endDate<filterStart) return false;
+    if(filterEnd   && s.startDate>filterEnd) return false;
+    return true;
+  });
+
+  const withDist = filtered.map(s=>({
+    ...s,
+    distMi:(userPos&&s.lat&&s.lng)?parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)):null,
+  }));
+  const sorted = userPos ? [...withDist].sort((a,b)=>(a.distMi??9999)-(b.distMi??9999)) : withDist;
+  const nearIds = userPos ? sorted.filter(s=>s.distMi!==null&&s.distMi<80).map(s=>s.id) : [];
+
+  const handleGeo = ()=>{
+    if(!navigator.geolocation){ toast("Geolocation not supported.",true); return; }
+    setGeoL(true);
+    navigator.geolocation.getCurrentPosition(
+      pos=>{ setUserPos({lat:pos.coords.latitude,lng:pos.coords.longitude}); setGeoL(false); toast("Showing theaters nearest you."); },
+      ()=>{ setGeoL(false); toast("Location access denied.",true); }
+    );
+  };
+
+  const MapComp = demoMode() ? StaticMap : GoogleMap;
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Public <em>Widget</em> Preview</h1>
+        <div className="ph-sub">As it will appear on the Squarespace site</div>
+      </div>
+      {!isEmbedded && (
+        <div className="film-row">
+          <span className="flbl">Preview film</span>
+          <select className="fsel" value={fi} onChange={e=>setFi(+e.target.value)}>
+            {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+          </select>
+        </div>
+      )}
+
+      <div className="wwrap">
+        {sheetError && (
+          <div style={{
+            background:"#fef2f2",border:"1px solid #fca5a5",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#991b1b",
+            letterSpacing:".1em",lineHeight:1.7,
+          }}>
+            <strong>⚠ Sheet Error:</strong> {sheetError}
+          </div>
+        )}
+        <div className="wt">{film.title}</div>
+        <div className="wtag">Now Playing · Select Theaters</div>
+        {/* Debug panel — visible only when ?debug=1 is in the URL */}
+        {typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1" && (
+          <div style={{
+            background:"#0d0d0d",border:"1px solid #333",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#4caf76",
+            letterSpacing:".08em",lineHeight:2,
+          }}>
+            <div style={{color:"#b8942a",marginBottom:6,letterSpacing:".15em"}}>⚙ DEBUG INFO</div>
+            <div>Film: <span style={{color:"white"}}>{film.title}</span></div>
+            <div>Sheet ID: <span style={{color:"white"}}>{film.sheetId}</span></div>
+            <div>Token: <span style={{color:"white"}}>{token ? "✓ OAuth signed in" : "None (using API key)"}</span></div>
+            <div>Screenings loaded: <span style={{color:"white"}}>{screenings.length}</span></div>
+            <div>Demo mode: <span style={{color:"white"}}>{demoMode() ? "YES — replace placeholder keys" : "No"}</span></div>
+            <div>Sheet URL: <a href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Open Sheet ↗</a></div>
+            <div>API test: <a href={`https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Test API call ↗</a></div>
+          </div>
+        )}
+
+        <div className="wf">
+          <label>From</label>
+          <input type="date" value={filterStart} onChange={e=>setFS(e.target.value)}/>
+          <label>To</label>
+          <input type="date" value={filterEnd} onChange={e=>setFE(e.target.value)}/>
+          <button className="geo-btn" onClick={handleGeo} disabled={geoLoading}>
+            {geoLoading?"Locating…":"📍 Near Me"}
+          </button>
+        </div>
+
+        <MapComp
+          screenings={filtered}
+          userPos={userPos}
+          activeId={activeId}
+          onMarkerClick={setActiveId}
+        />
+        {demoMode() && (
+          <div className="map-key-note">
+            Demo map — add a real <code style={{fontFamily:"var(--mono)",fontSize:9,background:"#f0ece0",padding:"1px 4px"}}>GOOGLE_MAPS_KEY</code> for the full interactive map with satellite/street view.
+          </div>
+        )}
+
+        {loading && (
+          <div style={{textAlign:"center",padding:"28px 0",fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>
+            <span className="spin">⟳</span> Loading screenings…
+          </div>
+        )}
+
+        {!loading && sorted.length===0 ? (
+          <div style={{textAlign:"center",padding:"36px 0",fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>
+            No screenings match this date range.
+          </div>
+        ) : (
+          <div className="wcards">
+            {sorted.map(s=>(
+              <div className="wcard" key={s.id||s._rowIndex}
+                style={{outline:activeId===s.id?"2px solid var(--gold)":"none",outlineOffset:-2}}
+                onClick={()=>setActiveId(activeId===s.id?null:s.id)}>
+                {nearIds.includes(s.id) && <div className="nbadge">Near You</div>}
+                <div className="wcn">{s.theater}</div>
+                <div className="wca">{s.address}</div>
+                <div className="wcd">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
+                {s.distMi!==null && <div className="wcdist">📍 {s.distMi} mi away</div>}
+                <a className="wctkt" href={s.ticketUrl} target="_blank" rel="noreferrer">Get Tickets →</a>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMBED VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function EmbedView() {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
+  const [copied, setCopied] = useState(null);
+
+  const copy = (id, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(id);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  };
+
+  const iframeCode = (filmId, filmTitle) =>
+`<!-- ${filmTitle} — Abramorama Screening Widget -->
+<iframe
+  src="${origin}?film=${filmId}&mode=widget"
+  width="100%"
+  height="680"
+  frameborder="0"
+  allow="geolocation"
+  style="border:none;display:block;width:100%"
+  title="${filmTitle} Screening Locations">
+</iframe>
+<script>
+  window.addEventListener("message", function(e) {
+    if (e.data && e.data.type === "abramorama-height") {
+      var iframes = document.querySelectorAll('iframe[title="${filmTitle} Screening Locations"]');
+      iframes.forEach(function(f){ f.style.height = e.data.height + "px"; });
+    }
+  });
+<\/script>`;
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Squarespace <em>Embed Code</em></h1>
+        <div className="ph-sub">Copy the snippet for each film page · paste into a Squarespace Code Block</div>
+      </div>
+
+      <div style={{marginBottom:12,fontFamily:"var(--mono)",fontSize:10,letterSpacing:".15em",color:"var(--muted)",textTransform:"uppercase"}}>
+        Detected app URL: <span style={{color:"var(--gold)"}}>{origin}</span>
+      </div>
+
+      {FILM_SHEETS.map(film => (
+        <div key={film.id} style={{marginBottom:32}}>
+          <div className="slbl">{film.title}</div>
+          <div style={{position:"relative"}}>
+            <pre style={{
+              background:"rgba(255,255,255,.03)",
+              border:"1px solid rgba(200,192,176,.18)",
+              padding:"20px 22px",
+              fontFamily:"var(--mono)",
+              fontSize:11,
+              lineHeight:1.75,
+              color:"rgba(245,240,232,.75)",
+              overflowX:"auto",
+              whiteSpace:"pre-wrap",
+              wordBreak:"break-all",
+            }}>
+              {iframeCode(film.id, film.title)}
+            </pre>
+            <button
+              className="btn btn-g"
+              onClick={() => copy(film.id, iframeCode(film.id, film.title))}
+              style={{position:"absolute",top:14,right:14,padding:"6px 14px",fontSize:9}}
+            >
+              {copied === film.id ? "✓ Copied!" : "Copy"}
+            </button>
+          </div>
+          <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".12em"}}>
+            Paste this into a <strong style={{color:"var(--paper)"}}>Code Block</strong> on the <strong style={{color:"var(--paper)"}}>{film.title}</strong> page in Squarespace.
+          </div>
+        </div>
+      ))}
+
+      <div style={{border:"1px solid rgba(184,148,42,.3)",background:"rgba(184,148,42,.05)",padding:"18px 22px",marginTop:8}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--gold)",marginBottom:10}}>
+          How to add a Code Block in Squarespace
+        </div>
+        <ol style={{paddingLeft:18,fontFamily:"var(--mono)",fontSize:10,color:"rgba(245,240,232,.65)",lineHeight:2.2,letterSpacing:".05em"}}>
+          <li>Open the film's page in the Squarespace editor</li>
+          <li>Click <strong style={{color:"var(--paper)"}}>+</strong> to add a block → choose <strong style={{color:"var(--paper)"}}>Code</strong></li>
+          <li>Paste the snippet above → click <strong style={{color:"var(--paper)"}}>Apply</strong></li>
+          <li>Save and preview — the map and theater list will appear</li>
+        </ol>
+      </div>
+
+      <div style={{marginTop:24,border:"1px solid rgba(200,192,176,.15)",padding:"16px 22px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:10}}>
+          Admin URL — share with Sterling
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <code style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--gold)",background:"rgba(255,255,255,.04)",padding:"8px 14px",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {origin}?mode=admin
+          </code>
+          <button className="btn btn-o" style={{fontSize:9,padding:"8px 14px"}}
+            onClick={() => copy("admin", `${origin}?mode=admin`)}>
+            {copied === "admin" ? "✓ Copied!" : "Copy"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOT
+// ─────────────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [mode, setMode] = useState(URL_MODE === "widget" ? "widget" : "admin");
+  const isEmbedded = URL_MODE === "widget";
+
+  useEffect(() => { postHeight(); });
+
+  const { token, user, loading:authLoading, signIn, signOut } = useGoogleAuth();
+  const [toastMsg, setToast] = useState(null);
+  const [toastErr, setTE]    = useState(false);
+
+  const toast = (msg,isErr=false)=>{ setToast(null); setTimeout(()=>{ setToast(msg); setTE(isErr); },10); };
+
+  return (
+    <>
+      <style>{css}</style>
+      <div className="shell">
+        <nav className="nav">
+          <div className="brand">Abramorama · Screenings</div>
+          {!isEmbedded && (
+            <div className="nav-r">
+              <div className="tabs">
+                <button className={`tab ${mode==="admin"?"on":""}`}  onClick={()=>setMode("admin")}>Admin</button>
+                <button className={`tab ${mode==="widget"?"on":""}`} onClick={()=>setMode("widget")}>Widget Preview</button>
+                <button className={`tab ${mode==="embed"?"on":""}`}  onClick={()=>setMode("embed")}>Embed Code</button>
+              </div>
+              {token ? (
+                <>
+                  <button className="auth-btn on">
+                    <span className="adot"/>{user?.name?.split(" ")[0]||"Connected"}
+                  </button>
+                  <button className="auth-btn sm" onClick={signOut}>Sign out</button>
+                </>
+              ) : (
+                <button className="auth-btn" onClick={signIn} disabled={authLoading||demoMode()}>
+                  <span className="adot" style={{background:"var(--muted)"}}/>
+                  {authLoading?"Loading…":demoMode()?"Demo mode":"Connect Google"}
+                </button>
+              )}
+            </div>
+          )}
+        </nav>
+        <div className="main">
+          {mode==="admin"  && <AdminView token={token} toast={toast}/>}
+          {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX}/>}
+          {mode==="embed"  && <EmbedView/>}
+        </div>
+        {toastMsg && <Toast msg={toastMsg} isErr={toastErr} onDone={()=>setToast(null)}/>}
+      </div>
+    </>
+  );
+}
