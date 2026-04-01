@@ -272,31 +272,44 @@ async function ensureHeader(token, sheetId) {
   await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`,
     { method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values:HDR_VALUES}) });
 }
-// Public read — no auth, uses Google Sheets JSON feed (CORS-safe)
+// Public read — no auth, uses Sheets API with key (CORS-safe)
 async function readScreeningsPublic(sheetId) {
-  // Use the Sheets API with API key — public sheets work without OAuth
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:H?key=${GOOGLE_MAPS_KEY}`;
   const r = await fetch(url);
   if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
   const d = await r.json();
   if(!d.values) return [];
-  return d.values.map((row, i) => ({
-    _rowIndex: i+1, id:`${sheetId}_${i}`,
-    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+  return d.values.map((row, i) => parseRow(row, i, sheetId)).filter(r=>r.theater);
+}
+
+function parseRow(row, i, sheetId) {
+  // Detect old 5-column format: Theater|Address|StartDate|EndDate|TicketURL
+  // vs new 8-column format: Theater|Address|City|State|ZIP|StartDate|EndDate|TicketURL
+  // A date looks like 2026-04-24; if col[2] is a date it's the old format
+  const isOldFormat = /^\d{4}-\d{2}-\d{2}$/.test(row[2]||"") || (!row[5] && !row[6]);
+  if (isOldFormat) {
+    return {
+      _rowIndex:i+1, id:`${sheetId}_${i}`,
+      theater:row[0]||"", address:row[1]||"",
+      city:"", state:"", zip:"",
+      startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+      lat:null, lng:null,
+    };
+  }
+  return {
+    _rowIndex:i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"",
+    city:row[2]||"", state:row[3]||"", zip:row[4]||"",
+    startDate:row[5]||"", endDate:row[6]||"", ticketUrl:row[7]||"",
     lat:null, lng:null,
-  })).filter(r=>r.theater);
+  };
 }
 
 async function readScreenings(token, sheetId) {
   if(!token) return readScreeningsPublic(sheetId);
   const d = await sheetsGet(token, sheetId, DATA_RANGE);
   if(!d.values) return [];
-  return d.values.map((row,i) => ({
-    _rowIndex:i+1, id:`${sheetId}_${i}`,
-    theater:row[0]||"", address:row[1]||"", city:row[2]||"", state:row[3]||"", zip:row[4]||"",
-    startDate:row[5]||"", endDate:row[6]||"", ticketUrl:row[7]||"",
-    lat:null, lng:null,
-  }));
+  return d.values.map((row,i) => parseRow(row, i, sheetId));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
