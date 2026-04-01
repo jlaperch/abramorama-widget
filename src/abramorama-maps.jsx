@@ -269,11 +269,27 @@ async function ensureHeader(token, sheetId) {
   await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`,
     { method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values:HDR_VALUES}) });
 }
+// Public read — no auth, uses Google Sheets JSON feed (CORS-safe)
+async function readScreeningsPublic(sheetId) {
+  // Use the Sheets API with API key — public sheets work without OAuth
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`;
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
+  const d = await r.json();
+  if(!d.values) return [];
+  return d.values.map((row, i) => ({
+    _rowIndex: i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+    lat:null, lng:null,
+  })).filter(r=>r.theater);
+}
+
 async function readScreenings(token, sheetId) {
+  if(!token) return readScreeningsPublic(sheetId);
   const d = await sheetsGet(token, sheetId, DATA_RANGE);
   if(!d.values) return [];
   return d.values.map((row,i) => ({
-    _rowIndex: i+1, id:`${sheetId}_${i}`,
+    _rowIndex:i+1, id:`${sheetId}_${i}`,
     theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
     lat:null, lng:null,
   }));
@@ -822,14 +838,119 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// EMBED VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function EmbedView() {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
+  const [copied, setCopied] = useState(null);
+
+  const copy = (id, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(id);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  };
+
+  const iframeCode = (filmId, filmTitle) =>
+`<!-- ${filmTitle} — Abramorama Screening Widget -->
+<iframe
+  src="${origin}?film=${filmId}&mode=widget"
+  width="100%"
+  height="680"
+  frameborder="0"
+  allow="geolocation"
+  style="border:none;display:block;width:100%"
+  title="${filmTitle} Screening Locations">
+</iframe>
+<script>
+  window.addEventListener("message", function(e) {
+    if (e.data && e.data.type === "abramorama-height") {
+      var iframes = document.querySelectorAll('iframe[title="${filmTitle} Screening Locations"]');
+      iframes.forEach(function(f){ f.style.height = e.data.height + "px"; });
+    }
+  });
+<\/script>`;
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Squarespace <em>Embed Code</em></h1>
+        <div className="ph-sub">Copy the snippet for each film page · paste into a Squarespace Code Block</div>
+      </div>
+
+      <div style={{marginBottom:12,fontFamily:"var(--mono)",fontSize:10,letterSpacing:".15em",color:"var(--muted)",textTransform:"uppercase"}}>
+        Detected app URL: <span style={{color:"var(--gold)"}}>{origin}</span>
+      </div>
+
+      {FILM_SHEETS.map(film => (
+        <div key={film.id} style={{marginBottom:32}}>
+          <div className="slbl">{film.title}</div>
+          <div style={{position:"relative"}}>
+            <pre style={{
+              background:"rgba(255,255,255,.03)",
+              border:"1px solid rgba(200,192,176,.18)",
+              padding:"20px 22px",
+              fontFamily:"var(--mono)",
+              fontSize:11,
+              lineHeight:1.75,
+              color:"rgba(245,240,232,.75)",
+              overflowX:"auto",
+              whiteSpace:"pre-wrap",
+              wordBreak:"break-all",
+            }}>
+              {iframeCode(film.id, film.title)}
+            </pre>
+            <button
+              className="btn btn-g"
+              onClick={() => copy(film.id, iframeCode(film.id, film.title))}
+              style={{position:"absolute",top:14,right:14,padding:"6px 14px",fontSize:9}}
+            >
+              {copied === film.id ? "✓ Copied!" : "Copy"}
+            </button>
+          </div>
+          <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".12em"}}>
+            Paste this into a <strong style={{color:"var(--paper)"}}>Code Block</strong> on the <strong style={{color:"var(--paper)"}}>{film.title}</strong> page in Squarespace.
+          </div>
+        </div>
+      ))}
+
+      <div style={{border:"1px solid rgba(184,148,42,.3)",background:"rgba(184,148,42,.05)",padding:"18px 22px",marginTop:8}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--gold)",marginBottom:10}}>
+          How to add a Code Block in Squarespace
+        </div>
+        <ol style={{paddingLeft:18,fontFamily:"var(--mono)",fontSize:10,color:"rgba(245,240,232,.65)",lineHeight:2.2,letterSpacing:".05em"}}>
+          <li>Open the film's page in the Squarespace editor</li>
+          <li>Click <strong style={{color:"var(--paper)"}}>+</strong> to add a block → choose <strong style={{color:"var(--paper)"}}>Code</strong></li>
+          <li>Paste the snippet above → click <strong style={{color:"var(--paper)"}}>Apply</strong></li>
+          <li>Save and preview — the map and theater list will appear</li>
+        </ol>
+      </div>
+
+      <div style={{marginTop:24,border:"1px solid rgba(200,192,176,.15)",padding:"16px 22px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:10}}>
+          Admin URL — share with Sterling
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <code style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--gold)",background:"rgba(255,255,255,.04)",padding:"8px 14px",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {origin}?mode=admin
+          </code>
+          <button className="btn btn-o" style={{fontSize:9,padding:"8px 14px"}}
+            onClick={() => copy("admin", `${origin}?mode=admin`)}>
+            {copied === "admin" ? "✓ Copied!" : "Copy"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ROOT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
-  // If ?mode=widget is in the URL (Squarespace embed), lock to widget view
   const [mode, setMode] = useState(URL_MODE === "widget" ? "widget" : "admin");
   const isEmbedded = URL_MODE === "widget";
 
-  // Post height to parent iframe on every render (for Squarespace auto-resize)
   useEffect(() => { postHeight(); });
 
   const { token, user, loading:authLoading, signIn, signOut } = useGoogleAuth();
@@ -847,8 +968,9 @@ export default function App() {
           {!isEmbedded && (
             <div className="nav-r">
               <div className="tabs">
-                <button className={`tab ${mode==="admin"?"on":""}`} onClick={()=>setMode("admin")}>Admin</button>
+                <button className={`tab ${mode==="admin"?"on":""}`}  onClick={()=>setMode("admin")}>Admin</button>
                 <button className={`tab ${mode==="widget"?"on":""}`} onClick={()=>setMode("widget")}>Widget Preview</button>
+                <button className={`tab ${mode==="embed"?"on":""}`}  onClick={()=>setMode("embed")}>Embed Code</button>
               </div>
               {token ? (
                 <>
@@ -867,9 +989,9 @@ export default function App() {
           )}
         </nav>
         <div className="main">
-          {mode==="admin"
-            ? <AdminView token={token} toast={toast}/>
-            : <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX}/>}
+          {mode==="admin"  && <AdminView token={token} toast={toast}/>}
+          {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX}/>}
+          {mode==="embed"  && <EmbedView/>}
         </div>
         {toastMsg && <Toast msg={toastMsg} isErr={toastErr} onDone={()=>setToast(null)}/>}
       </div>
