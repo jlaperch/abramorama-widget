@@ -223,25 +223,40 @@ function loadMaps() {
 if (!demoMode()) loadMaps();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GEOCODING  (Google Geocoding API, falls back to Nominatim in demo)
+// GEOCODING
 // ─────────────────────────────────────────────────────────────────────────────
 const geocache = {};
 async function geocodeAddress(address) {
+  if (!address) return null;
   if (geocache[address]) return geocache[address];
-  if (demoMode()) {
-    // Nominatim fallback
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
-      { headers:{"Accept-Language":"en"} });
-    const d = await r.json();
-    if (!d.length) return null;
-    const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
-    geocache[address] = g; return g;
+  try {
+    if (demoMode()) {
+      // Nominatim fallback for demo mode
+      const r = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
+        { headers:{"Accept-Language":"en"} }
+      );
+      const d = await r.json();
+      if (!d.length) return null;
+      const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
+      geocache[address] = g; return g;
+    }
+    // Use Google Geocoding API — wait for Maps to be loaded first
+    await loadMaps();
+    return new Promise((resolve) => {
+      const geocoder = new window.google.maps.Geocoder();
+      geocoder.geocode({ address }, (results, status) => {
+        if (status !== "OK" || !results.length) { resolve(null); return; }
+        const { lat, lng } = results[0].geometry.location;
+        const g = { lat: lat(), lng: lng() };
+        geocache[address] = g;
+        resolve(g);
+      });
+    });
+  } catch(e) {
+    console.warn("Geocode failed for:", address, e);
+    return null;
   }
-  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
-  const d = await r.json();
-  if (d.status !== "OK") return null;
-  const { lat, lng } = d.results[0].geometry.location;
-  const g = { lat, lng }; geocache[address]=g; return g;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
