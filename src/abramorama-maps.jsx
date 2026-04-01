@@ -207,7 +207,7 @@ function loadMaps() {
   if (mapsPromise) return mapsPromise;
   if (demoMode()) { mapsPromise = Promise.reject(new Error("demo")); return mapsPromise; }
   mapsPromise = new Promise((resolve, reject) => {
-    if (window.google?.maps) { resolve(window.google.maps); return; }
+    if (window.google?.maps?.places) { resolve(window.google.maps); return; }
     const cb = `_gmInit_${Date.now()}`;
     window[cb] = () => { resolve(window.google.maps); delete window[cb]; };
     const s = document.createElement("script");
@@ -218,6 +218,9 @@ function loadMaps() {
   });
   return mapsPromise;
 }
+
+// Kick off Maps + Places load immediately on app start (needed for autocomplete)
+if (!demoMode()) loadMaps();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GEOCODING  (Google Geocoding API, falls back to Nominatim in demo)
@@ -594,38 +597,43 @@ function SetupBanner() {
 function usePlacesAutocomplete(inputRef, onSelect) {
   const acRef = useRef(null);
   useEffect(() => {
-    if (!inputRef.current || !window.google?.maps?.places) return;
-    acRef.current = new window.google.maps.places.Autocomplete(inputRef.current, {
-      types: ["establishment", "geocode"],
-      componentRestrictions: { country: "us" },
-      fields: ["name", "formatted_address", "address_components", "geometry"],
-    });
-    const listener = acRef.current.addListener("place_changed", () => {
-      const place = acRef.current.getPlace();
-      if (!place.geometry) return;
-
-      // Parse address components
-      const get = (type) => {
-        const comp = place.address_components?.find(c => c.types.includes(type));
-        return comp ? comp.short_name : "";
-      };
-      const streetNum  = get("street_number");
-      const route      = get("route");
-      const city       = get("locality") || get("sublocality");
-      const state      = get("administrative_area_level_1");
-      const zip        = get("postal_code");
-      const fullAddr   = `${streetNum} ${route}, ${city}, ${state} ${zip}`.trim();
-
-      onSelect({
-        name:    place.name || "",
-        address: fullAddr,
-        city, state, zip,
-        lat: place.geometry.location.lat(),
-        lng: place.geometry.location.lng(),
+    if (!inputRef.current || demoMode()) return;
+    // Wait for Maps + Places to be ready before attaching autocomplete
+    loadMaps().then(() => {
+      if (!inputRef.current || acRef.current) return;
+      acRef.current = new window.google.maps.places.Autocomplete(inputRef.current, {
+        types: ["establishment", "geocode"],
+        fields: ["name", "formatted_address", "address_components", "geometry"],
       });
-    });
-    return () => window.google?.maps?.event.removeListener(listener);
-  }, [inputRef, onSelect]);
+      acRef.current.addListener("place_changed", () => {
+        const place = acRef.current.getPlace();
+        if (!place.geometry) return;
+        const get = (type) => {
+          const comp = place.address_components?.find(c => c.types.includes(type));
+          return comp ? comp.short_name : "";
+        };
+        const streetNum = get("street_number");
+        const route     = get("route");
+        const city      = get("locality") || get("sublocality") || get("administrative_area_level_2");
+        const state     = get("administrative_area_level_1");
+        const zip       = get("postal_code");
+        const fullAddr  = [streetNum, route].filter(Boolean).join(" ") + `, ${city}, ${state} ${zip}`;
+        onSelect({
+          name:    place.name || "",
+          address: fullAddr.trim(),
+          city, state, zip,
+          lat: place.geometry.location.lat(),
+          lng: place.geometry.location.lng(),
+        });
+      });
+    }).catch(() => {}); // silently skip in demo mode
+    return () => {
+      if (acRef.current) {
+        window.google?.maps?.event.clearInstanceListeners(acRef.current);
+        acRef.current = null;
+      }
+    };
+  }, []);
 }
 
 function AddForm({ onSave, onCancel, saving }) {
