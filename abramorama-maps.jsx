@@ -269,29 +269,19 @@ async function ensureHeader(token, sheetId) {
   await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`,
     { method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values:HDR_VALUES}) });
 }
-// Public read — no auth, works for "Anyone with the link" sheets via CSV export
+// Public read — no auth, uses Google Sheets JSON feed (CORS-safe)
 async function readScreeningsPublic(sheetId) {
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=Screenings`;
+  // Use the Sheets API with API key — public sheets work without OAuth
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`;
   const r = await fetch(url);
   if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
-  const text = await r.text();
-  const lines = text.trim().split("\n").slice(1); // skip header row
-  return lines.map((line, i) => {
-    const cols = [];
-    let cur = "", inQ = false;
-    for(let c of line) {
-      if(c==='"') { inQ=!inQ; }
-      else if(c===',' && !inQ) { cols.push(cur); cur=""; }
-      else { cur+=c; }
-    }
-    cols.push(cur);
-    const clean = cols.map(c=>c.trim());
-    return {
-      _rowIndex:i+1, id:`${sheetId}_${i}`,
-      theater:clean[0]||"", address:clean[1]||"", startDate:clean[2]||"", endDate:clean[3]||"", ticketUrl:clean[4]||"",
-      lat:null, lng:null,
-    };
-  }).filter(r=>r.theater);
+  const d = await r.json();
+  if(!d.values) return [];
+  return d.values.map((row, i) => ({
+    _rowIndex: i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+    lat:null, lng:null,
+  })).filter(r=>r.theater);
 }
 
 async function readScreenings(token, sheetId) {
