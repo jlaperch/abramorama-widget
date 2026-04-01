@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIG — replace these before deploying
@@ -26,9 +26,9 @@ function postHeight() {
 
 const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly";
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
-const DATA_RANGE  = "Screenings!A2:E";
-const HDR_RANGE   = "Screenings!A1:E1";
-const HDR_VALUES  = [["Theater","Address","Start Date","End Date","Ticket URL"]];
+const DATA_RANGE  = "Screenings!A2:H";
+const HDR_RANGE   = "Screenings!A1:H1";
+const HDR_VALUES  = [["Theater","Address","City","State","ZIP","Start Date","End Date","Ticket URL"]];
 
 // Demo data shown before real credentials are wired up
 const DEMO = [
@@ -211,7 +211,7 @@ function loadMaps() {
     const cb = `_gmInit_${Date.now()}`;
     window[cb] = () => { resolve(window.google.maps); delete window[cb]; };
     const s = document.createElement("script");
-    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&callback=${cb}&libraries=marker`;
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&callback=${cb}&libraries=marker,places`;
     s.async = true;
     s.onerror = reject;
     document.head.appendChild(s);
@@ -290,7 +290,8 @@ async function readScreenings(token, sheetId) {
   if(!d.values) return [];
   return d.values.map((row,i) => ({
     _rowIndex:i+1, id:`${sheetId}_${i}`,
-    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+    theater:row[0]||"", address:row[1]||"", city:row[2]||"", state:row[3]||"", zip:row[4]||"",
+    startDate:row[5]||"", endDate:row[6]||"", ticketUrl:row[7]||"",
     lat:null, lng:null,
   }));
 }
@@ -589,23 +590,126 @@ function SetupBanner() {
   );
 }
 
+// ── PLACES AUTOCOMPLETE HOOK ──────────────────────────────────────────────────
+function usePlacesAutocomplete(inputRef, onSelect) {
+  const acRef = useRef(null);
+  useEffect(() => {
+    if (!inputRef.current || !window.google?.maps?.places) return;
+    acRef.current = new window.google.maps.places.Autocomplete(inputRef.current, {
+      types: ["establishment", "geocode"],
+      componentRestrictions: { country: "us" },
+      fields: ["name", "formatted_address", "address_components", "geometry"],
+    });
+    const listener = acRef.current.addListener("place_changed", () => {
+      const place = acRef.current.getPlace();
+      if (!place.geometry) return;
+
+      // Parse address components
+      const get = (type) => {
+        const comp = place.address_components?.find(c => c.types.includes(type));
+        return comp ? comp.short_name : "";
+      };
+      const streetNum  = get("street_number");
+      const route      = get("route");
+      const city       = get("locality") || get("sublocality");
+      const state      = get("administrative_area_level_1");
+      const zip        = get("postal_code");
+      const fullAddr   = `${streetNum} ${route}, ${city}, ${state} ${zip}`.trim();
+
+      onSelect({
+        name:    place.name || "",
+        address: fullAddr,
+        city, state, zip,
+        lat: place.geometry.location.lat(),
+        lng: place.geometry.location.lng(),
+      });
+    });
+    return () => window.google?.maps?.event.removeListener(listener);
+  }, [inputRef, onSelect]);
+}
+
 function AddForm({ onSave, onCancel, saving }) {
-  const [f,setF] = useState({theater:"",address:"",startDate:"",endDate:"",ticketUrl:""});
-  const set = (k,v)=>setF(p=>({...p,[k]:v}));
-  const ok = f.theater&&f.address&&f.startDate&&f.endDate&&f.ticketUrl;
+  const [f, setF] = useState({ theater:"", address:"", city:"", state:"", zip:"", startDate:"", endDate:"", ticketUrl:"", lat:null, lng:null });
+  const [suggestions, setSuggestions] = useState([]);
+  const addrRef = useRef(null);
+  const set = (k,v) => setF(p => ({...p, [k]:v}));
+
+  // Wire up Places Autocomplete on the address input
+  const handlePlaceSelect = useCallback((place) => {
+    setF(p => ({
+      ...p,
+      theater: p.theater || place.name, // auto-fill theater name if empty
+      address: place.address,
+      city:    place.city,
+      state:   place.state,
+      zip:     place.zip,
+      lat:     place.lat,
+      lng:     place.lng,
+    }));
+  }, []);
+
+  usePlacesAutocomplete(addrRef, handlePlaceSelect);
+
+  const ok = f.theater && f.address && f.startDate && f.endDate && f.ticketUrl;
+
   return (
     <div className="fc">
       <h3>New Screening</h3>
       <div className="fg">
-        <div className="field"><label>Theater Name</label><input placeholder="e.g. IFC Center" value={f.theater} onChange={e=>set("theater",e.target.value)}/></div>
-        <div className="field"><label>Address or ZIP</label><input placeholder="Full address or ZIP code" value={f.address} onChange={e=>set("address",e.target.value)}/></div>
-        <div className="field"><label>Start Date</label><input type="date" value={f.startDate} onChange={e=>set("startDate",e.target.value)}/></div>
-        <div className="field"><label>End Date</label><input type="date" value={f.endDate} onChange={e=>set("endDate",e.target.value)}/></div>
-        <div className="field full"><label>Ticket Purchase URL</label><input placeholder="https://..." value={f.ticketUrl} onChange={e=>set("ticketUrl",e.target.value)}/></div>
+        <div className="field">
+          <label>Theater Name</label>
+          <input placeholder="e.g. IFC Center" value={f.theater} onChange={e=>set("theater",e.target.value)}/>
+        </div>
+        <div className="field" style={{position:"relative"}}>
+          <label>Address <span style={{color:"var(--gold)",fontSize:8,letterSpacing:".1em"}}> AUTOCOMPLETE</span></label>
+          <input
+            ref={addrRef}
+            placeholder="Start typing address or theater name…"
+            value={f.address}
+            onChange={e=>set("address",e.target.value)}
+            style={{paddingRight:28}}
+          />
+          {f.lat && f.lng && (
+            <span style={{position:"absolute",right:10,bottom:10,fontSize:12}} title="Location confirmed">✓</span>
+          )}
+        </div>
+        <div className="field">
+          <label>City</label>
+          <input placeholder="Auto-filled" value={f.city} onChange={e=>set("city",e.target.value)}/>
+        </div>
+        <div className="field" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div className="field">
+            <label>State</label>
+            <input placeholder="Auto" value={f.state} onChange={e=>set("state",e.target.value)}/>
+          </div>
+          <div className="field">
+            <label>ZIP</label>
+            <input placeholder="Auto" value={f.zip} onChange={e=>set("zip",e.target.value)}/>
+          </div>
+        </div>
+        <div className="field">
+          <label>Start Date</label>
+          <input type="date" value={f.startDate} onChange={e=>set("startDate",e.target.value)}/>
+        </div>
+        <div className="field">
+          <label>End Date</label>
+          <input type="date" value={f.endDate} onChange={e=>set("endDate",e.target.value)}/>
+        </div>
+        <div className="field full">
+          <label>Ticket Purchase URL</label>
+          <input placeholder="https://..." value={f.ticketUrl} onChange={e=>set("ticketUrl",e.target.value)}/>
+        </div>
       </div>
+      {f.lat && f.lng && (
+        <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--green)",letterSpacing:".12em",marginTop:8}}>
+          ✓ Location confirmed — geocoordinates captured ({f.lat.toFixed(4)}, {f.lng.toFixed(4)})
+        </div>
+      )}
       <div className="fa">
         <button className="btn btn-o" onClick={onCancel}>Cancel</button>
-        <button className="btn btn-g" disabled={!ok||saving} onClick={()=>onSave(f)}>{saving?"Saving…":"Save to Sheet"}</button>
+        <button className="btn btn-g" disabled={!ok||saving} onClick={()=>onSave(f)}>
+          {saving?"Saving…":"Save to Sheet"}
+        </button>
       </div>
     </div>
   );
@@ -644,7 +748,7 @@ function AdminView({ token, toast }) {
     }
     setSaving(true);
     try {
-      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.startDate,fd.endDate,fd.ticketUrl]]);
+      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.city||"",fd.state||"",fd.zip||"",fd.startDate,fd.endDate,fd.ticketUrl]]);
       await load(); setShowForm(false); toast("Saved to Google Sheets ✓");
     } catch{ toast("Save failed — check permissions.",true); }
     finally { setSaving(false); }
@@ -690,7 +794,7 @@ function AdminView({ token, toast }) {
             return (
               <div className="tr" key={s.id||s._rowIndex}>
                 <div><div className="tn"><span className={`sd ${st}`}/>{s.theater}</div></div>
-                <div className="ta">{s.address}</div>
+                <div className="ta">{s.city && s.state ? `${s.city}, ${s.state}` : s.address}</div>
                 <div className="td">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
                 <a className="tl" href={s.ticketUrl} target="_blank" rel="noreferrer">{s.ticketUrl.replace(/^https?:\/\//,"").split("/")[0]}</a>
                 <button className="btn btn-d" onClick={()=>handleDelete(s)}>Remove</button>
@@ -755,18 +859,39 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
     return true;
   });
 
-  const withDist = filtered.map(s=>({
-    ...s,
-    distMi:(userPos&&s.lat&&s.lng)?parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)):null,
-  }));
-  const sorted = userPos ? [...withDist].sort((a,b)=>(a.distMi??9999)-(b.distMi??9999)) : withDist;
-  const nearIds = userPos ? sorted.filter(s=>s.distMi!==null&&s.distMi<80).map(s=>s.id) : [];
+  const { sorted, nearIds } = useMemo(() => {
+    const withDist = filtered.map(s => ({
+      ...s,
+      distMi: (userPos && s.lat && s.lng)
+        ? parseFloat(milesAway(userPos.lat, userPos.lng, s.lat, s.lng))
+        : null,
+    }));
+    const sorted = userPos
+      ? [...withDist].sort((a, b) => (a.distMi ?? 9999) - (b.distMi ?? 9999))
+      : withDist;
+    const nearIds = userPos
+      ? sorted.filter(s => s.distMi !== null && s.distMi < 80).map(s => s.id)
+      : [];
+    return { sorted, nearIds };
+  // Re-run whenever screenings update (geocoding fills in lat/lng) or userPos changes
+  }, [screenings, userPos, filterStart, filterEnd]);
 
   const handleGeo = ()=>{
     if(!navigator.geolocation){ toast("Geolocation not supported.",true); return; }
     setGeoL(true);
     navigator.geolocation.getCurrentPosition(
-      pos=>{ setUserPos({lat:pos.coords.latitude,lng:pos.coords.longitude}); setGeoL(false); toast("Showing theaters nearest you."); },
+      pos=>{
+        const pos2 = {lat:pos.coords.latitude, lng:pos.coords.longitude};
+        setUserPos(pos2);
+        setGeoL(false);
+        // Count how many theaters still need geocoding
+        const pending = screenings.filter(s=>!s.lat||!s.lng).length;
+        if(pending > 0){
+          toast(`Found you! Geocoding ${pending} theater${pending!==1?"s":""} — distances will update shortly.`);
+        } else {
+          toast("Showing theaters nearest you.");
+        }
+      },
       ()=>{ setGeoL(false); toast("Location access denied.",true); }
     );
   };
@@ -858,7 +983,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
                 onClick={()=>setActiveId(activeId===s.id?null:s.id)}>
                 {nearIds.includes(s.id) && <div className="nbadge">Near You</div>}
                 <div className="wcn">{s.theater}</div>
-                <div className="wca">{s.address}</div>
+                <div className="wca">{s.city && s.state ? `${s.city}, ${s.state} ${s.zip}` : s.address}</div>
                 <div className="wcd">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
                 {s.distMi!==null && <div className="wcdist">📍 {s.distMi} mi away</div>}
                 <a className="wctkt" href={s.ticketUrl} target="_blank" rel="noreferrer">Get Tickets →</a>
