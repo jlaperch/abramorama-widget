@@ -723,10 +723,12 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
     (async()=>{
       setLoading(true); setScreenings([]);
       let rows;
-      if(demoMode()||!token){ rows=[...DEMO]; }
-      else {
+      if(demoMode()){
+        rows=[...DEMO];
+      } else {
+        // Widget has no token — uses public API key read. Admin uses OAuth token read.
         try{ rows=await readScreenings(token,film.sheetId); }
-        catch{ rows=[]; }
+        catch(e){ console.error("Sheet read failed:",e); rows=[]; }
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
