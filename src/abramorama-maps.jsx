@@ -6,10 +6,19 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 const GOOGLE_CLIENT_ID  = "945891790401-fb328mkkbjmgvimscf2gj8jh6qjpjpff.apps.googleusercontent.com";
 const GOOGLE_MAPS_KEY   = "AIzaSyDzg5YYRxCwyci5DFVXLrUbOPLZQo_H8cM";
 
-const FILM_SHEETS = [
+// Static fallback films — used if master sheet is unavailable or before it loads
+const FALLBACK_FILMS = [
   { id:"film_1", title:"Eraserheads", sheetId:"1zDOAA46yeaGH31gQMorBoXcSlI1y251beqV8Cn45Kuw" },
   { id:"film_2", title:"Just Sing",   sheetId:"1rZ-PO41AIJGgQyJApiN1yHgEFyDcpkW3LxBS_IThtUA" },
 ];
+
+// Master sheet stores the film list — Sterling manages films from the Film Manager tab
+// Set this to the ID of your master "Films" Google Sheet (tab named "Films")
+// Columns: ID | Title | Sheet ID | Active (yes/no)
+const MASTER_SHEET_ID = "1Yao5pZc-pnZO1RbcIEBed9idJbEkhNtV1JrIYRAZeUQ";
+
+// Runtime film list — starts with fallback, replaced by master sheet data when loaded
+let FILM_SHEETS = [...FALLBACK_FILMS];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL PARAM HELPERS  (?film=film_2&mode=widget  or  ?mode=admin)
@@ -330,6 +339,48 @@ async function readScreenings(token, sheetId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MASTER FILM LIST — read/write to master Sheet
+// ─────────────────────────────────────────────────────────────────────────────
+async function readFilmList(token) {
+  if(!token || MASTER_SHEET_ID.startsWith("YOUR_")) return [...FALLBACK_FILMS];
+  try {
+    await ensureFilmListHeader(token);
+    const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A2:D");
+    if(!d.values) return [...FALLBACK_FILMS];
+    return d.values
+      .filter(row => row[0] && row[1] && row[2])
+      .filter(row => (row[3]||"yes").toLowerCase() !== "no")
+      .map((row, i) => ({ id: row[0], title: row[1], sheetId: row[2] }));
+  } catch(e) {
+    console.warn("Could not read film list:", e);
+    return [...FALLBACK_FILMS];
+  }
+}
+
+async function ensureFilmListHeader(token) {
+  try {
+    const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A1:D1");
+    if(d.values?.[0]?.[0] === "ID") return;
+    await fetch(`${SHEETS_BASE}/${MASTER_SHEET_ID}/values/${encodeURIComponent("Films!A1:D1")}?valueInputOption=RAW`, {
+      method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+      body: JSON.stringify({ values:[["ID","Title","Sheet ID","Active"]] }),
+    });
+  } catch(e) {}
+}
+
+async function addFilmToMaster(token, film) {
+  await sheetsAppend(token, MASTER_SHEET_ID, "Films!A2:D", [[film.id, film.title, film.sheetId, "yes"]]);
+}
+
+async function removeFilmFromMaster(token, rowIndex) {
+  const meta = await fetch(`${SHEETS_BASE}/${MASTER_SHEET_ID}?fields=sheets.properties`,
+    {headers:{Authorization:`Bearer ${token}`}}).then(r=>r.json());
+  const tab = meta.sheets?.find(sh=>sh.properties.title==="Films");
+  if(!tab) throw new Error("No Films tab");
+  await sheetsDelete(token, MASTER_SHEET_ID, tab.properties.sheetId, rowIndex);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GOOGLE AUTH HOOK
 // ─────────────────────────────────────────────────────────────────────────────
 function useGoogleAuth() {
@@ -465,13 +516,21 @@ function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
       markers.current.push(marker);
     });
 
-    // Fit bounds
+    // Fit bounds to placed theaters (or default US view)
     if(placed.length > 0) {
       const bounds = new maps.LatLngBounds();
       placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
       if(userPos) bounds.extend(userPos);
-      mapObj.current.fitBounds(bounds, 60);
+      mapObj.current.fitBounds(bounds, 48);
       if(placed.length===1) mapObj.current.setZoom(12);
+      // Cap zoom out — never show whole world, max out at zoom 3
+      const listener = maps.event.addListenerOnce(mapObj.current, "bounds_changed", () => {
+        if(mapObj.current.getZoom() < 3) mapObj.current.setZoom(3);
+      });
+    } else {
+      // Default US view when no pins yet
+      mapObj.current.setCenter({ lat:39.5, lng:-98.35 });
+      mapObj.current.setZoom(4);
     }
   }, [screenings, userPos, activeId]);
 
@@ -756,7 +815,7 @@ function AddForm({ onSave, onCancel, saving }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function AdminView({ token, toast }) {
+function AdminView({ token, toast, films=FALLBACK_FILMS }) {
   const [fi, setFi]         = useState(0);
   const [rows, setRows]     = useState([]);
   const [loading, setLoading] = useState(false);
@@ -764,7 +823,7 @@ function AdminView({ token, toast }) {
   const [syncErr, setSyncErr] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
-  const film = FILM_SHEETS[fi];
+  const film = films[fi];
 
   const load = useCallback(async()=>{
     if(demoMode()||!token) { setRows(DEMO.slice(0,3)); setSync("Demo data — connect Google to sync"); return; }
@@ -814,7 +873,7 @@ function AdminView({ token, toast }) {
       <div className="film-row">
         <span className="flbl">Film</span>
         <select className="fsel" value={fi} onChange={e=>{setFi(+e.target.value);setShowForm(false);}}>
-          {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+          {films.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
         </select>
         <button className="btn btn-g" onClick={()=>setShowForm(v=>!v)}>{showForm?"✕ Cancel":"+ Add Screening"}</button>
         <button className="btn btn-o" onClick={load} disabled={loading}>↻ Refresh</button>
@@ -848,7 +907,7 @@ function AdminView({ token, toast }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // WIDGET VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function WidgetView({ token, toast, defaultFilmIdx=0 }) {
+function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
   const [fi, setFi]             = useState(defaultFilmIdx);
   const isEmbedded              = URL_MODE === "widget";
   const [screenings, setScreenings] = useState([]);
@@ -859,7 +918,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
   const [loading, setLoading]   = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [sheetError, setSheetError] = useState(null);
-  const film = FILM_SHEETS[fi];
+  const film = films[fi];
 
   useEffect(()=>{
     let cancelled=false;
@@ -948,7 +1007,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
         <div className="film-row">
           <span className="flbl">Preview film</span>
           <select className="fsel" value={fi} onChange={e=>setFi(+e.target.value)}>
-            {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+            {films.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
           </select>
         </div>
       )}
@@ -1039,7 +1098,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // EMBED VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function EmbedView() {
+function EmbedView({ films=FALLBACK_FILMS }) {
   const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
   const [copied, setCopied] = useState(null);
 
@@ -1081,7 +1140,7 @@ function EmbedView() {
         Detected app URL: <span style={{color:"var(--gold)"}}>{origin}</span>
       </div>
 
-      {FILM_SHEETS.map(film => (
+      {films.map(film => (
         <div key={film.id} style={{marginBottom:32}}>
           <div className="slbl">{film.title}</div>
           <div style={{position:"relative"}}>
@@ -1144,6 +1203,162 @@ function EmbedView() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FILM MANAGER VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function FilmManagerView({ token, films, setFilms, toast }) {
+  const [adding, setAdding]   = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [removing, setRemoving] = useState(null);
+  const [form, setForm]       = useState({ title:"", sheetId:"" });
+  const masterReady = !MASTER_SHEET_ID.startsWith("YOUR_");
+
+  const handleAdd = async () => {
+    if(!form.title || !form.sheetId) return;
+    setSaving(true);
+    const newFilm = {
+      id: `film_${Date.now()}`,
+      title: form.title.trim(),
+      sheetId: form.sheetId.trim(),
+    };
+    try {
+      if(masterReady && token) await addFilmToMaster(token, newFilm);
+      FILM_SHEETS = [...films, newFilm];
+      setFilms([...films, newFilm]);
+      setForm({ title:"", sheetId:"" });
+      setAdding(false);
+      toast(`"${newFilm.title}" added successfully.`);
+    } catch(e) {
+      toast("Failed to save film.", true);
+    } finally { setSaving(false); }
+  };
+
+  const handleRemove = async (film, idx) => {
+    setRemoving(film.id);
+    try {
+      if(masterReady && token) await removeFilmFromMaster(token, idx + 1);
+      const updated = films.filter(f => f.id !== film.id);
+      FILM_SHEETS = updated;
+      setFilms(updated);
+      toast(`"${film.title}" removed.`);
+    } catch(e) {
+      toast("Failed to remove film.", true);
+    } finally { setRemoving(null); }
+  };
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Film <em>Manager</em></h1>
+        <div className="ph-sub">Add or remove films — each film links to its own Google Sheet</div>
+      </div>
+
+      {!masterReady && (
+        <div className="sbanner" style={{marginBottom:24}}>
+          <h4>⚙ Set up a master Sheet to persist film changes</h4>
+          <ol>
+            <li>Create a new Google Sheet → rename the default tab to <code>Films</code></li>
+            <li>Copy the Sheet ID from its URL</li>
+            <li>Replace <code>YOUR_MASTER_SHEET_ID</code> in the app file with that ID</li>
+            <li>Until then, films added here persist only for this session</li>
+          </ol>
+          <button className="dismiss" onClick={()=>{}}>Got it</button>
+        </div>
+      )}
+
+      <div className="slbl">Active Films ({films.length})</div>
+
+      <div className="tbl" style={{marginBottom:28}}>
+        <div className="tr hdr">
+          <span>Title</span><span>Sheet ID</span><span>Sheet Link</span><span>Screenings</span><span></span>
+        </div>
+        {films.map((film, idx) => (
+          <div className="tr" key={film.id}>
+            <div className="tn">{film.title}</div>
+            <div className="ta" style={{fontFamily:"var(--mono)",fontSize:10}}>{film.sheetId.slice(0,24)}…</div>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Open Sheet ↗</a>
+            <a
+              href={`?film=${film.id}&mode=widget`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Preview widget ↗</a>
+            <button
+              className="btn btn-d"
+              disabled={removing === film.id}
+              onClick={() => handleRemove(film, idx)}
+            >{removing===film.id ? "…" : "Remove"}</button>
+          </div>
+        ))}
+      </div>
+
+      {adding ? (
+        <div className="fc">
+          <h3>Add New Film</h3>
+          <div className="fg">
+            <div className="field">
+              <label>Film Title</label>
+              <input
+                placeholder="e.g. Ghost Elephants"
+                value={form.title}
+                onChange={e=>setForm(p=>({...p,title:e.target.value}))}
+              />
+            </div>
+            <div className="field">
+              <label>Google Sheet ID</label>
+              <input
+                placeholder="Paste Sheet ID from URL"
+                value={form.sheetId}
+                onChange={e=>setForm(p=>({...p,sheetId:e.target.value}))}
+              />
+            </div>
+          </div>
+          <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".1em"}}>
+            Sheet ID is the string between /d/ and /edit in the Sheet URL. The Sheet must have a tab named <strong style={{color:"var(--paper)"}}>Screenings</strong>.
+          </div>
+          <div className="fa">
+            <button className="btn btn-o" onClick={()=>setAdding(false)}>Cancel</button>
+            <button
+              className="btn btn-g"
+              disabled={!form.title||!form.sheetId||saving}
+              onClick={handleAdd}
+            >{saving?"Saving…":"Add Film"}</button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn btn-g" onClick={()=>setAdding(true)}>+ Add New Film</button>
+      )}
+
+      <div style={{marginTop:36,border:"1px solid rgba(200,192,176,.15)",padding:"18px 22px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:12}}>
+          Squarespace embed codes for active films
+        </div>
+        {films.map(film => {
+          const origin = typeof window!=="undefined" ? window.location.origin : "https://abramorama-widget.vercel.app";
+          const snippet = `<iframe src="${origin}?film=${film.id}&mode=widget" width="100%" height="900" frameborder="0" scrolling="yes" allow="geolocation" style="width:100%;min-height:900px;border:none;display:block;"></iframe>`;
+          return (
+            <div key={film.id} style={{marginBottom:14}}>
+              <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--gold)",letterSpacing:".12em",marginBottom:4}}>{film.title}</div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <code style={{fontFamily:"var(--mono)",fontSize:9,color:"rgba(245,240,232,.5)",background:"rgba(255,255,255,.03)",padding:"6px 10px",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {snippet}
+                </code>
+                <button className="btn btn-o" style={{fontSize:9,padding:"6px 12px",flexShrink:0}}
+                  onClick={()=>{navigator.clipboard.writeText(snippet);toast(`Copied embed for ${film.title}`);}}>
+                  Copy
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ROOT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -1155,8 +1370,17 @@ export default function App() {
   const { token, user, loading:authLoading, signIn, signOut } = useGoogleAuth();
   const [toastMsg, setToast] = useState(null);
   const [toastErr, setTE]    = useState(false);
+  const [films, setFilms]    = useState([...FALLBACK_FILMS]);
 
   const toast = (msg,isErr=false)=>{ setToast(null); setTimeout(()=>{ setToast(msg); setTE(isErr); },10); };
+
+  // Load film list from master sheet when signed in
+  useEffect(() => {
+    if(!token) return;
+    readFilmList(token).then(list => {
+      if(list.length > 0) { FILM_SHEETS = list; setFilms(list); }
+    }).catch(()=>{});
+  }, [token]);
 
   return (
     <>
@@ -1169,6 +1393,7 @@ export default function App() {
               <div className="tabs">
                 <button className={`tab ${mode==="admin"?"on":""}`}  onClick={()=>setMode("admin")}>Admin</button>
                 <button className={`tab ${mode==="widget"?"on":""}`} onClick={()=>setMode("widget")}>Widget Preview</button>
+                <button className={`tab ${mode==="films"?"on":""}`}  onClick={()=>setMode("films")}>Films</button>
                 <button className={`tab ${mode==="embed"?"on":""}`}  onClick={()=>setMode("embed")}>Embed Code</button>
               </div>
               {token ? (
@@ -1188,9 +1413,10 @@ export default function App() {
           )}
         </nav>
         <div className="main">
-          {mode==="admin"  && <AdminView token={token} toast={toast}/>}
-          {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX}/>}
-          {mode==="embed"  && <EmbedView/>}
+          {mode==="admin"  && <AdminView token={token} toast={toast} films={films}/>}
+          {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX} films={films}/>}
+          {mode==="films"  && <FilmManagerView token={token} films={films} setFilms={setFilms} toast={toast}/>}
+          {mode==="embed"  && <EmbedView films={films}/>}
         </div>
         {toastMsg && <Toast msg={toastMsg} isErr={toastErr} onDone={()=>setToast(null)}/>}
       </div>
