@@ -348,9 +348,14 @@ async function readFilmList(token) {
     const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A2:D");
     if(!d.values) return [...FALLBACK_FILMS];
     return d.values
-      .filter(row => row[0] && row[1] && row[2])
+      .filter(row => row[1] && row[2])
       .filter(row => (row[3]||"yes").toLowerCase() !== "no")
-      .map((row, i) => ({ id: row[0], title: row[1], sheetId: row[2] }));
+      .map((row) => {
+        const title = row[1].trim();
+        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+        const id = (row[0]||"").trim() || `film_${slug}`;
+        return { id, title, sheetId: row[2].trim() };
+      });
   } catch(e) {
     console.warn("Could not read film list:", e);
     return [...FALLBACK_FILMS];
@@ -1215,8 +1220,9 @@ function FilmManagerView({ token, films, setFilms, toast }) {
   const handleAdd = async () => {
     if(!form.title || !form.sheetId) return;
     setSaving(true);
+    const slug = form.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
     const newFilm = {
-      id: `film_${Date.now()}`,
+      id: `film_${slug}`,
       title: form.title.trim(),
       sheetId: form.sheetId.trim(),
     };
