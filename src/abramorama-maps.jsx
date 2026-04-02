@@ -936,10 +936,12 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
 
   return (
     <div>
-      <div className="ph">
-        <h1>Public <em>Widget</em> Preview</h1>
-        <div className="ph-sub">As it will appear on the Squarespace site</div>
-      </div>
+      {!isEmbedded && (
+        <div className="ph">
+          <h1>Public <em>Widget</em> Preview</h1>
+          <div className="ph-sub">As it will appear on the Squarespace site</div>
+        </div>
+      )}
       {!isEmbedded && (
         <div className="film-row">
           <span className="flbl">Preview film</span>
@@ -959,8 +961,8 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
             <strong>⚠ Sheet Error:</strong> {sheetError}
           </div>
         )}
-        <div className="wt">{film.title}</div>
-        <div className="wtag">Now Playing · Select Theaters</div>
+        <div className="wt">Find a Theater</div>
+        <div className="wtag">{film.title} · Now Playing</div>
         {/* Debug panel — visible only when ?debug=1 is in the URL */}
         {typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1" && (
           <div style={{
