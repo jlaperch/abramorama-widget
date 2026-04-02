@@ -10,7 +10,7 @@ const GOOGLE_SHEETS_KEY = "AIzaSyDv3PowHsC6MuIoM_9jObjcVwSuHDBaO1E"; // Sheets-o
 // Static fallback films — used if master sheet is unavailable or before it loads
 const FALLBACK_FILMS = [
   { id:"film_1", title:"Eraserheads", sheetId:"1zDOAA46yeaGH31gQMorBoXcSlI1y251beqV8Cn45Kuw" },
-  { id:"film_2", title:"Just Sing",   sheetId:"1rZ-PO41AIJGgQyJApiN1yHgEFyDcpkW3LxBS_IThtUA" },
+  { id:"film_2", title:"Just Sing",   sheetId:"18hIKsURCB6_rc0lcp_naNvEZvCkN9ttPOC8eDM6NvXU" },
 ];
 
 // Master sheet stores the film list — Sterling manages films from the Film Manager tab
