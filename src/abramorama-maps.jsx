@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 const GOOGLE_CLIENT_ID  = "945891790401-fb328mkkbjmgvimscf2gj8jh6qjpjpff.apps.googleusercontent.com";
 const GOOGLE_MAPS_KEY   = "AIzaSyDzg5YYRxCwyci5DFVXLrUbOPLZQo_H8cM";
+const GOOGLE_SHEETS_KEY = "AIzaSyDv3PowHsC6MuIoM_9jObjcVwSuHDBaO1E"; // Sheets-only key, no referrer restriction
 
 // Static fallback films — used if master sheet is unavailable or before it loads
 const FALLBACK_FILMS = [
@@ -300,8 +301,12 @@ async function ensureHeader(token, sheetId) {
 }
 // Public read — no auth, uses Sheets API with key (CORS-safe)
 async function readScreeningsPublic(sheetId) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:H?key=${GOOGLE_MAPS_KEY}`;
-  const r = await fetch(url);
+  // Small delay ensures page referrer header is set before the API call
+  await new Promise(r => setTimeout(r, 200));
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:H?key=${GOOGLE_SHEETS_KEY}`;
+  const r = await fetch(url, {
+    headers: { "Referer": typeof window !== "undefined" ? window.location.origin : "" }
+  });
   if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
   const d = await r.json();
   if(!d.values) return [];
