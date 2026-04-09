@@ -346,21 +346,42 @@ async function readScreenings(token, sheetId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // MASTER FILM LIST — read/write to master Sheet
 // ─────────────────────────────────────────────────────────────────────────────
+function parseFilmRows(values) {
+  return values
+    .filter(row => row[1] && row[2])
+    .filter(row => (row[3]||"yes").toLowerCase() !== "no")
+    .map((row) => {
+      const title = row[1].trim();
+      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+      const id = (row[0]||"").trim() || `film_${slug}`;
+      return { id, title, sheetId: row[2].trim() };
+    });
+}
+
+// Public film list read — uses Sheets key, no auth needed
+// Called by the widget so it can show any film without Sterling being signed in
+async function readFilmListPublic() {
+  if(MASTER_SHEET_ID.startsWith("YOUR_")) return [...FALLBACK_FILMS];
+  try {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${MASTER_SHEET_ID}/values/Films!A2:D?key=${GOOGLE_SHEETS_KEY}`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`Film list read failed: ${r.status}`);
+    const d = await r.json();
+    if(!d.values) return [...FALLBACK_FILMS];
+    return parseFilmRows(d.values);
+  } catch(e) {
+    console.warn("Could not read film list publicly:", e);
+    return [...FALLBACK_FILMS];
+  }
+}
+
 async function readFilmList(token) {
   if(!token || MASTER_SHEET_ID.startsWith("YOUR_")) return [...FALLBACK_FILMS];
   try {
     await ensureFilmListHeader(token);
     const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A2:D");
     if(!d.values) return [...FALLBACK_FILMS];
-    return d.values
-      .filter(row => row[1] && row[2])
-      .filter(row => (row[3]||"yes").toLowerCase() !== "no")
-      .map((row) => {
-        const title = row[1].trim();
-        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
-        const id = (row[0]||"").trim() || `film_${slug}`;
-        return { id, title, sheetId: row[2].trim() };
-      });
+    return parseFilmRows(d.values);
   } catch(e) {
     console.warn("Could not read film list:", e);
     return [...FALLBACK_FILMS];
@@ -1402,7 +1423,15 @@ export default function App() {
 
   const toast = (msg,isErr=false)=>{ setToast(null); setTimeout(()=>{ setToast(msg); setTE(isErr); },10); };
 
-  // Load film list from master sheet when signed in
+  // Load film list publicly on startup — no sign-in needed
+  // This lets the widget show any film including ones added via Film Manager
+  useEffect(() => {
+    readFilmListPublic().then(list => {
+      if(list.length > 0) { FILM_SHEETS = list; setFilms(list); }
+    }).catch(()=>{});
+  }, []);
+
+  // Reload film list from master sheet when signed in (gets write access too)
   useEffect(() => {
     if(!token) return;
     readFilmList(token).then(list => {
