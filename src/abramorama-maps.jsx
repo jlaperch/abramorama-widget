@@ -526,19 +526,24 @@ function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
       markers.current.push(marker);
     });
 
-    // Fit bounds to placed theaters (or default US view)
+    // Fit bounds to placed theaters — always constrain to US view
     if(placed.length > 0) {
       const bounds = new maps.LatLngBounds();
       placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
       if(userPos) bounds.extend(userPos);
       mapObj.current.fitBounds(bounds, 48);
       if(placed.length===1) mapObj.current.setZoom(12);
-      // Cap zoom out — never show whole world, max out at zoom 3
-      const listener = maps.event.addListenerOnce(mapObj.current, "bounds_changed", () => {
-        if(mapObj.current.getZoom() < 3) mapObj.current.setZoom(3);
+      // After fitBounds, enforce min zoom of 4 (US view) and max zoom of 3 never
+      maps.event.addListenerOnce(mapObj.current, "idle", () => {
+        const z = mapObj.current.getZoom();
+        if(z < 4) mapObj.current.setZoom(4);
+        // Also constrain center to continental US
+        const c = mapObj.current.getCenter();
+        const lat = Math.max(24, Math.min(50, c.lat()));
+        const lng = Math.max(-130, Math.min(-60, c.lng()));
+        mapObj.current.setCenter({ lat, lng });
       });
     } else {
-      // Default US view when no pins yet
       mapObj.current.setCenter({ lat:39.5, lng:-98.35 });
       mapObj.current.setZoom(4);
     }
@@ -918,8 +923,20 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
 // WIDGET VIEW
 // ─────────────────────────────────────────────────────────────────────────────
 function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
-  const [fi, setFi]             = useState(defaultFilmIdx);
+  // Re-evaluate film index when master sheet loads — URL param may match a film
+  // not in the fallback list (e.g. film_american_agitators)
+  const getFilmIdx = (filmList) => {
+    if (!URL_FILM_ID) return defaultFilmIdx;
+    const idx = filmList.findIndex(f => f.id === URL_FILM_ID);
+    return idx >= 0 ? idx : defaultFilmIdx;
+  };
+  const [fi, setFi]             = useState(()=>getFilmIdx(films));
   const isEmbedded              = URL_MODE === "widget";
+
+  // Re-sync film index when films list updates from master sheet
+  useEffect(() => {
+    if(URL_FILM_ID) setFi(getFilmIdx(films));
+  }, [films]);
   const [screenings, setScreenings] = useState([]);
   const [filterStart, setFS]    = useState("");
   const [filterEnd, setFE]      = useState("");
