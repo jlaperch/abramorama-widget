@@ -537,6 +537,8 @@ function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
       .catch(() => { setMapErr(true); setMapLoad(false); });
   }, []);
 
+  const boundsFitRef = useRef(false); // only fit bounds once on initial load
+
   // Sync markers whenever screenings change
   useEffect(() => {
     if(!mapObj.current || !window.google?.maps) return;
@@ -582,24 +584,25 @@ function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
       markers.current.push(marker);
     });
 
-    // Fit bounds to placed theaters — always constrain to US view
-    if(placed.length > 0) {
+    // Only fit bounds when we have new geocoded data — not on every activeId change
+    const shouldFitBounds = placed.length > 0 && !boundsFitRef.current;
+    const shouldRefitForUser = userPos && placed.length > 0;
+    if(shouldFitBounds || shouldRefitForUser) {
       const bounds = new maps.LatLngBounds();
       placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
       if(userPos) bounds.extend(userPos);
       mapObj.current.fitBounds(bounds, 48);
       if(placed.length===1) mapObj.current.setZoom(12);
-      // After fitBounds, enforce min zoom of 4 (US view) and max zoom of 3 never
       maps.event.addListenerOnce(mapObj.current, "idle", () => {
         const z = mapObj.current.getZoom();
         if(z < 4) mapObj.current.setZoom(4);
-        // Also constrain center to continental US
         const c = mapObj.current.getCenter();
         const lat = Math.max(24, Math.min(50, c.lat()));
         const lng = Math.max(-130, Math.min(-60, c.lng()));
         mapObj.current.setCenter({ lat, lng });
       });
-    } else {
+      if(placed.length > 0) boundsFitRef.current = true;
+    } else if(placed.length === 0) {
       mapObj.current.setCenter({ lat:39.5, lng:-98.35 });
       mapObj.current.setZoom(4);
     }
@@ -1022,12 +1025,18 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
-      // Geocode each address
-      for(const s of rows){
-        if(s.lat&&s.lng) continue;
-        const g=await geocodeAddress(s.address).catch(()=>null);
-        if(!cancelled && g) setScreenings(p=>p.map(x=>x.id===s.id?{...x,...g}:x));
-        await new Promise(r=>setTimeout(r,demoMode()?320:80));
+      // Geocode all addresses in parallel, then do ONE state update at the end
+      // This prevents the map from re-fitting bounds on every single geocode result
+      const needsGeocode = rows.filter(s => !s.lat || !s.lng);
+      if(needsGeocode.length > 0) {
+        const results = await Promise.all(
+          needsGeocode.map(s => geocodeAddress(s.address).catch(()=>null))
+        );
+        if(!cancelled) {
+          const geoMap = {};
+          needsGeocode.forEach((s, i) => { if(results[i]) geoMap[s.id] = results[i]; });
+          setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
+        }
       }
     })();
     return()=>{cancelled=true;};
