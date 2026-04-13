@@ -34,7 +34,7 @@ function postHeight() {
   try { window.parent.postMessage({ type:"abramorama-height", height:document.body.scrollHeight }, "*"); } catch{}
 }
 
-const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly";
+const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive";
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const DATA_RANGE  = "Screenings!A2:H";
 const HDR_RANGE   = "Screenings!A1:H1";
@@ -341,6 +341,41 @@ async function readScreenings(token, sheetId) {
   const d = await sheetsGet(token, sheetId, DATA_RANGE);
   if(!d.values) return [];
   return d.values.map((row,i) => parseRow(row, i, sheetId));
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE DRIVE — create a new Sheet with a Screenings tab
+// ─────────────────────────────────────────────────────────────────────────────
+async function createFilmSheet(token, title) {
+  // Create the spreadsheet via Sheets API
+  const r = await fetch(`${SHEETS_BASE}`, {
+    method: "POST",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({
+      properties: { title: `${title} — Screenings` },
+      sheets: [{ properties: { title:"Screenings" } }]
+    }),
+  });
+  if(!r.ok) throw new Error(`Sheet creation failed: ${r.status}`);
+  const d = await r.json();
+  const sheetId = d.spreadsheetId;
+
+  // Write header row
+  await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`, {
+    method: "PUT",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({ values: HDR_VALUES }),
+  });
+
+  // Make it publicly readable (anyone with link can view)
+  await fetch(`https://www.googleapis.com/drive/v3/files/${sheetId}/permissions`, {
+    method: "POST",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({ role:"reader", type:"anyone" }),
+  });
+
+  return sheetId;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1138,6 +1173,21 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
             ))}
           </div>
         )}
+
+        {/* Powered by footer */}
+        <div style={{
+          textAlign:"center",padding:"14px 0 2px",
+          fontFamily:"var(--mono)",fontSize:9,
+          color:"var(--muted)",letterSpacing:".15em",
+          borderTop:"1px solid var(--border)",marginTop:1,
+        }}>
+          POWERED BY <a href="https://abramorama.com" target="_blank" rel="noreferrer"
+            style={{color:"var(--muted)",textDecoration:"none"}}>AB2</a>
+          {" & "}
+          <a href="https://538marketing.com" target="_blank" rel="noreferrer"
+            style={{color:"var(--muted)",textDecoration:"none"}}>538 MARKETING</a>
+        </div>
+
       </div>
     </div>
   );
@@ -1256,26 +1306,30 @@ function EmbedView({ films=FALLBACK_FILMS }) {
 function FilmManagerView({ token, films, setFilms, toast }) {
   const [adding, setAdding]   = useState(false);
   const [saving, setSaving]   = useState(false);
+  const [saveStep, setSaveStep] = useState("");
   const [removing, setRemoving] = useState(null);
   const [form, setForm]       = useState({ title:"", sheetId:"" });
   const masterReady = !MASTER_SHEET_ID.startsWith("YOUR_");
+  const [saveStep, setSaveStep] = useState("");
 
   const handleAdd = async () => {
-    if(!form.title || !form.sheetId) return;
-    setSaving(true);
-    const slug = form.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-    const newFilm = {
-      id: `film_${slug}`,
-      title: form.title.trim(),
-      sheetId: form.sheetId.trim(),
-    };
+    if(!form.title) return;
+    setSaving(true); setSaveStep("Creating Google Sheet…");
     try {
+      let sheetId = form.sheetId.trim();
+      if(!sheetId) {
+        if(!token) throw new Error("Sign in required to auto-create Sheet");
+        sheetId = await createFilmSheet(token, form.title.trim());
+        setSaveStep("Sheet created — saving film…");
+      }
+      const slug = form.title.trim().toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+      const newFilm = { id:`film_${slug}`, title:form.title.trim(), sheetId };
       if(masterReady && token) await addFilmToMaster(token, newFilm);
       FILM_SHEETS = [...films, newFilm];
       setFilms([...films, newFilm]);
       setForm({ title:"", sheetId:"" });
       setAdding(false);
-      toast(`"${newFilm.title}" added successfully.`);
+      toast(`"${newFilm.title}" added — Sheet ready.`);
     } catch(e) {
       toast("Failed to save film.", true);
     } finally { setSaving(false); }
@@ -1347,7 +1401,7 @@ function FilmManagerView({ token, films, setFilms, toast }) {
         <div className="fc">
           <h3>Add New Film</h3>
           <div className="fg">
-            <div className="field">
+            <div className="field full">
               <label>Film Title</label>
               <input
                 placeholder="e.g. Ghost Elephants"
@@ -1355,25 +1409,39 @@ function FilmManagerView({ token, films, setFilms, toast }) {
                 onChange={e=>setForm(p=>({...p,title:e.target.value}))}
               />
             </div>
-            <div className="field">
-              <label>Google Sheet ID</label>
+            <div className="field full">
+              <label>Google Sheet ID <span style={{color:"var(--green)",fontSize:8,letterSpacing:".1em"}}> OPTIONAL — leave blank to auto-create</span></label>
               <input
-                placeholder="Paste Sheet ID from URL"
+                placeholder="Leave blank to auto-create Sheet, or paste existing Sheet ID"
                 value={form.sheetId}
                 onChange={e=>setForm(p=>({...p,sheetId:e.target.value}))}
               />
             </div>
           </div>
-          <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".1em"}}>
-            Sheet ID is the string between /d/ and /edit in the Sheet URL. The Sheet must have a tab named <strong style={{color:"var(--paper)"}}>Screenings</strong>.
-          </div>
+          {!form.sheetId && token && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--green)",letterSpacing:".1em",lineHeight:1.8}}>
+              ✓ A new Google Sheet will be created automatically, named "{form.title||"Film Title"} — Screenings",
+              with the correct headers and public sharing already set up.
+            </div>
+          )}
+          {!form.sheetId && !token && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"#e74c3c",letterSpacing:".1em"}}>
+              ⚠ Sign in with Google to enable auto-create, or paste an existing Sheet ID above.
+            </div>
+          )}
+          {saveStep && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--gold)",letterSpacing:".1em"}}>
+              <span style={{animation:"spin .7s linear infinite",display:"inline-block",marginRight:6}}>⟳</span>
+              {saveStep}
+            </div>
+          )}
           <div className="fa">
             <button className="btn btn-o" onClick={()=>setAdding(false)}>Cancel</button>
             <button
               className="btn btn-g"
-              disabled={!form.title||!form.sheetId||saving}
+              disabled={!form.title||saving}
               onClick={handleAdd}
-            >{saving?"Saving…":"Add Film"}</button>
+            >{saving ? saveStep||"Working…" : "Add Film"}</button>
           </div>
         </div>
       ) : (
@@ -1402,6 +1470,150 @@ function FilmManagerView({ token, films, setFilms, toast }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEALTH CHECK VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function HealthCheckView({ films }) {
+  const [results, setResults] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [lastRun, setLastRun] = useState(null);
+
+  const runChecks = async () => {
+    setRunning(true);
+    setResults(films.map(f => ({ ...f, status:"checking", rowCount:null, error:null })));
+
+    const checks = films.map(async (film) => {
+      try {
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:H?key=${GOOGLE_SHEETS_KEY}`;
+        const r = await fetch(url);
+        if(!r.ok) {
+          const d = await r.json().catch(()=>({}));
+          return { ...film, status:"error", error:`HTTP ${r.status}: ${d?.error?.message||"Unknown error"}`, rowCount:null };
+        }
+        const d = await r.json();
+        const rows = (d.values||[]).filter(row=>row[0]);
+        // Check for upcoming screenings
+        const today = new Date().toISOString().slice(0,10);
+        const upcoming = rows.filter(row => (row[6]||row[3]||"") >= today);
+        return {
+          ...film,
+          status: rows.length === 0 ? "empty" : "ok",
+          rowCount: rows.length,
+          upcomingCount: upcoming.length,
+          error: null,
+        };
+      } catch(e) {
+        return { ...film, status:"error", error:e.message, rowCount:null };
+      }
+    });
+
+    const res = await Promise.all(checks);
+    setResults(res);
+    setRunning(false);
+    setLastRun(new Date().toLocaleTimeString());
+  };
+
+  useEffect(() => { if(films.length > 0) runChecks(); }, [films]);
+
+  const statusColor = s => ({ ok:"var(--green)", error:"#e74c3c", empty:"var(--gold)", checking:"var(--muted)" })[s]||"var(--muted)";
+  const statusIcon  = s => ({ ok:"✓", error:"✕", empty:"⚠", checking:"⟳" })[s]||"?";
+  const statusLabel = (r) => {
+    if(r.status==="checking") return "Checking…";
+    if(r.status==="error") return r.error;
+    if(r.status==="empty") return "Sheet accessible but no screenings found";
+    return `${r.rowCount} screening${r.rowCount!==1?"s":""} · ${r.upcomingCount} upcoming`;
+  };
+
+  const allOk     = results.length > 0 && results.every(r=>r.status==="ok");
+  const hasErrors = results.some(r=>r.status==="error");
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Health <em>Check</em></h1>
+        <div className="ph-sub">Real-time status of every film Sheet</div>
+      </div>
+
+      {/* Summary banner */}
+      {results.length > 0 && !running && (
+        <div style={{
+          border:`1px solid ${hasErrors?"rgba(231,76,60,.4)":"rgba(76,175,118,.4)"}`,
+          background:hasErrors?"rgba(231,76,60,.06)":"rgba(76,175,118,.06)",
+          padding:"14px 20px", marginBottom:24, display:"flex",
+          alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12,
+        }}>
+          <div style={{fontFamily:"var(--serif)",fontSize:"1.1rem",fontWeight:300,fontStyle:"italic",color:hasErrors?"#e74c3c":"var(--green)"}}>
+            {hasErrors ? `${results.filter(r=>r.status==="error").length} film${results.filter(r=>r.status==="error").length!==1?"s":""} need attention` : "All films are live and reading correctly"}
+          </div>
+          <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".12em"}}>
+            Last checked: {lastRun}
+          </div>
+        </div>
+      )}
+
+      {/* Film status list */}
+      <div className="tbl" style={{marginBottom:28}}>
+        <div className="tr hdr">
+          <span>Film</span><span>Status</span><span>Screenings</span><span>Sheet</span><span>Widget</span>
+        </div>
+        {results.length === 0 ? (
+          <div className="empty"><div className="big">⟳</div><p>Running checks…</p></div>
+        ) : results.map(r => (
+          <div className="tr" key={r.id}>
+            <div className="tn">{r.title}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <span style={{
+                width:8,height:8,borderRadius:"50%",background:statusColor(r.status),
+                display:"inline-block",flexShrink:0,
+                animation:r.status==="checking"?"spin .7s linear infinite":undefined,
+              }}/>
+              <span style={{fontFamily:"var(--mono)",fontSize:10,color:statusColor(r.status),letterSpacing:".1em"}}>
+                {r.status.toUpperCase()}
+              </span>
+            </div>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:r.status==="error"?"#e74c3c":"var(--muted)",letterSpacing:".08em",lineHeight:1.6}}>
+              {statusLabel(r)}
+            </div>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${r.sheetId}`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Open Sheet ↗</a>
+            <a
+              href={`?film=${r.id}&mode=widget`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Preview ↗</a>
+          </div>
+        ))}
+      </div>
+
+      <button className="btn btn-g" onClick={runChecks} disabled={running}>
+        {running ? "⟳ Checking…" : "↻ Re-run Checks"}
+      </button>
+
+      {/* Troubleshooting guide */}
+      <div style={{marginTop:32,border:"1px solid rgba(200,192,176,.15)",padding:"20px 24px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:14}}>
+          Troubleshooting Guide
+        </div>
+        {[
+          { status:"HTTP 400", fix:'Sheet tab is not named "Screenings" — open the Sheet, right-click the tab at the bottom and rename it exactly: Screenings' },
+          { status:"HTTP 403", fix:'Sheet is not shared publicly — open the Sheet → Share → General access → Anyone with the link → Viewer' },
+          { status:"HTTP 404", fix:'Sheet ID is wrong — check the Films tab and compare the ID to the URL of the actual Sheet' },
+          { status:"Empty Sheet", fix:'No screenings added yet — open Admin tab, select the film, and add screenings' },
+          { status:"Widget shows wrong film", fix:'Check the embed code film param — should match the film ID shown in the Films tab' },
+        ].map(item => (
+          <div key={item.status} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid rgba(200,192,176,.1)"}}>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:"#e74c3c",letterSpacing:".12em",marginBottom:4}}>{item.status}</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:"rgba(245,240,232,.6)",lineHeight:1.7,letterSpacing:".05em"}}>{item.fix}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1452,6 +1664,7 @@ export default function App() {
                 <button className={`tab ${mode==="widget"?"on":""}`} onClick={()=>setMode("widget")}>Widget Preview</button>
                 <button className={`tab ${mode==="films"?"on":""}`}  onClick={()=>setMode("films")}>Films</button>
                 <button className={`tab ${mode==="embed"?"on":""}`}  onClick={()=>setMode("embed")}>Embed Code</button>
+                <button className={`tab ${mode==="health"?"on":""}`} onClick={()=>setMode("health")}>Health</button>
               </div>
               {token ? (
                 <>
@@ -1474,6 +1687,7 @@ export default function App() {
           {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX} films={films}/>}
           {mode==="films"  && <FilmManagerView token={token} films={films} setFilms={setFilms} toast={toast}/>}
           {mode==="embed"  && <EmbedView films={films}/>}
+          {mode==="health" && <HealthCheckView films={films}/>}
         </div>
         {toastMsg && <Toast msg={toastMsg} isErr={toastErr} onDone={()=>setToast(null)}/>}
       </div>
