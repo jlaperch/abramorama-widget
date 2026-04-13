@@ -1176,16 +1176,17 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
 
         {/* Powered by footer */}
         <div style={{
-          textAlign:"center",padding:"14px 0 2px",
-          fontFamily:"var(--mono)",fontSize:9,
-          color:"var(--muted)",letterSpacing:".15em",
-          borderTop:"1px solid var(--border)",marginTop:1,
+          textAlign:"center",padding:"14px 0 6px",
+          fontFamily:"'DM Mono',monospace",fontSize:9,
+          color:"#9a9080",letterSpacing:".18em",
+          borderTop:"1px solid #c8c0b0",marginTop:4,
         }}>
-          POWERED BY <a href="https://abramorama.com" target="_blank" rel="noreferrer"
-            style={{color:"var(--muted)",textDecoration:"none"}}>AB2</a>
+          POWERED BY{" "}
+          <a href="https://abramorama.com" target="_blank" rel="noreferrer"
+            style={{color:"#9a9080",textDecoration:"none",fontWeight:500}}>AB2</a>
           {" & "}
           <a href="https://538marketing.com" target="_blank" rel="noreferrer"
-            style={{color:"var(--muted)",textDecoration:"none"}}>538 MARKETING</a>
+            style={{color:"#9a9080",textDecoration:"none",fontWeight:500}}>538 MARKETING</a>
         </div>
 
       </div>
@@ -1310,7 +1311,6 @@ function FilmManagerView({ token, films, setFilms, toast }) {
   const [removing, setRemoving] = useState(null);
   const [form, setForm]       = useState({ title:"", sheetId:"" });
   const masterReady = !MASTER_SHEET_ID.startsWith("YOUR_");
-  const [saveStep, setSaveStep] = useState("");
 
   const handleAdd = async () => {
     if(!form.title) return;
