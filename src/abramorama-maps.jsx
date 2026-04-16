@@ -1,14 +1,25 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIG — replace these before deploying
 // ─────────────────────────────────────────────────────────────────────────────
 const GOOGLE_CLIENT_ID  = "945891790401-fb328mkkbjmgvimscf2gj8jh6qjpjpff.apps.googleusercontent.com";
+const GOOGLE_MAPS_KEY   = "AIzaSyDzg5YYRxCwyci5DFVXLrUbOPLZQo_H8cM";
+const GOOGLE_SHEETS_KEY = "AIzaSyDv3PowHsC6MuIoM_9jObjcVwSuHDBaO1E"; // Sheets-only key, no referrer restriction
 
-const FILM_SHEETS = [
+// Static fallback films — used if master sheet is unavailable or before it loads
+const FALLBACK_FILMS = [
   { id:"film_1", title:"Eraserheads", sheetId:"1zDOAA46yeaGH31gQMorBoXcSlI1y251beqV8Cn45Kuw" },
-  { id:"film_2", title:"Just Sing",   sheetId:"1rZ-PO41AIJGgQyJApiN1yHgEFyDcpkW3LxBS_IThtUA" },
+  { id:"film_2", title:"Just Sing",   sheetId:"18hIKsURCB6_rc0lcp_naNvEZvCkN9ttPOC8eDM6NvXU" },
 ];
+
+// Master sheet stores the film list — Sterling manages films from the Film Manager tab
+// Set this to the ID of your master "Films" Google Sheet (tab named "Films")
+// Columns: ID | Title | Sheet ID | Active (yes/no)
+const MASTER_SHEET_ID = "1Yao5pZc-pnZO1RbcIEBed9idJbEkhNtV1JrIYRAZeUQ";
+
+// Runtime film list — starts with fallback, replaced by master sheet data when loaded
+let FILM_SHEETS = [...FALLBACK_FILMS];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL PARAM HELPERS  (?film=film_2&mode=widget  or  ?mode=admin)
@@ -23,11 +34,11 @@ function postHeight() {
   try { window.parent.postMessage({ type:"abramorama-height", height:document.body.scrollHeight }, "*"); } catch{}
 }
 
-const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly";
+const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive";
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
-const DATA_RANGE  = "Screenings!A2:E";
-const HDR_RANGE   = "Screenings!A1:E1";
-const HDR_VALUES  = [["Theater","Address","Start Date","End Date","Ticket URL"]];
+const DATA_RANGE  = "Screenings!A2:H";
+const HDR_RANGE   = "Screenings!A1:H1";
+const HDR_VALUES  = [["Theater","Address","City","State","ZIP","Start Date","End Date","Ticket URL"]];
 
 // Demo data shown before real credentials are wired up
 const DEMO = [
@@ -160,8 +171,10 @@ body{background:var(--ink);font-family:var(--serif)}
 .map-key-note{margin-top:6px;font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.1em}
 
 /* CARDS */
-.wcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:1px;background:var(--border)}
-.wcard{background:white;padding:15px;position:relative}
+.wcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:1px;background:var(--border);align-items:stretch}
+.wcard{background:white;padding:15px;position:relative;display:flex;flex-direction:column}
+.wcdist{font-family:var(--mono);font-size:9px;color:var(--gold);margin-bottom:8px}
+.wctkt{display:inline-block;background:var(--ink);color:white;font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;padding:6px 13px;text-decoration:none;transition:background .15s;margin-top:auto;align-self:flex-start}
 .wcn{font-family:var(--serif);font-size:15px;font-weight:600;color:var(--ink);margin-bottom:3px}
 .wca{font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;line-height:1.55}
 .wcd{font-family:var(--mono);font-size:10px;color:var(--ink);margin-bottom:9px;padding:5px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
@@ -196,42 +209,66 @@ const fmtDate = d => { if(!d) return "—"; const [,m,day]=d.split("-"); return 
 const status  = s => { const t=new Date().toISOString().slice(0,10); return s.endDate<t?"ended":s.startDate>t?"upcoming":"active"; };
 const haversineKm = (a,b,c,d) => { const R=6371,dL=(c-a)*Math.PI/180,dG=(d-b)*Math.PI/180,x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dG/2)**2; return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)); };
 const milesAway   = (a,b,c,d) => (haversineKm(a,b,c,d)*0.621371).toFixed(1);
-const demoMode    = () => GOOGLE_CLIENT_ID.startsWith("YOUR_");
+const demoMode    = () => GOOGLE_CLIENT_ID.startsWith("YOUR_") || GOOGLE_MAPS_KEY.startsWith("YOUR_");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LEAFLET LOADER  (free — no API key required)
+// GOOGLE MAPS LOADER
 // ─────────────────────────────────────────────────────────────────────────────
-let leafletPromise = null;
-function loadLeaflet() {
-  if (leafletPromise) return leafletPromise;
-  leafletPromise = new Promise((resolve, reject) => {
-    if (window.L) { resolve(window.L); return; }
-    // CSS
-    const link = document.createElement("link");
-    link.rel = "stylesheet"; link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-    document.head.appendChild(link);
-    // JS
+let mapsPromise = null;
+function loadMaps() {
+  if (mapsPromise) return mapsPromise;
+  if (demoMode()) { mapsPromise = Promise.reject(new Error("demo")); return mapsPromise; }
+  mapsPromise = new Promise((resolve, reject) => {
+    if (window.google?.maps?.places) { resolve(window.google.maps); return; }
+    const cb = `_gmInit_${Date.now()}`;
+    window[cb] = () => { resolve(window.google.maps); delete window[cb]; };
     const s = document.createElement("script");
-    s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"; s.async = true;
-    s.onload = () => resolve(window.L);
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&callback=${cb}&libraries=marker,places`;
+    s.async = true;
     s.onerror = reject;
     document.head.appendChild(s);
   });
-  return leafletPromise;
+  return mapsPromise;
 }
 
+// Kick off Maps + Places load immediately on app start (needed for autocomplete)
+if (!demoMode()) loadMaps();
+
 // ─────────────────────────────────────────────────────────────────────────────
-// GEOCODING  (Nominatim / OpenStreetMap — free, no key needed)
+// GEOCODING
 // ─────────────────────────────────────────────────────────────────────────────
 const geocache = {};
 async function geocodeAddress(address) {
+  if (!address) return null;
   if (geocache[address]) return geocache[address];
-  const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
-    { headers:{"Accept-Language":"en"} });
-  const d = await r.json();
-  if (!d.length) return null;
-  const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
-  geocache[address] = g; return g;
+  try {
+    if (demoMode()) {
+      // Nominatim fallback for demo mode
+      const r = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
+        { headers:{"Accept-Language":"en"} }
+      );
+      const d = await r.json();
+      if (!d.length) return null;
+      const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
+      geocache[address] = g; return g;
+    }
+    // Use Google Geocoding API — wait for Maps to be loaded first
+    await loadMaps();
+    return new Promise((resolve) => {
+      const geocoder = new window.google.maps.Geocoder();
+      geocoder.geocode({ address }, (results, status) => {
+        if (status !== "OK" || !results.length) { resolve(null); return; }
+        const { lat, lng } = results[0].geometry.location;
+        const g = { lat: lat(), lng: lng() };
+        geocache[address] = g;
+        resolve(g);
+      });
+    });
+  } catch(e) {
+    console.warn("Geocode failed for:", address, e);
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,14 +299,151 @@ async function ensureHeader(token, sheetId) {
   await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`,
     { method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}, body:JSON.stringify({values:HDR_VALUES}) });
 }
+// Public read — no auth, uses Sheets API with key (CORS-safe)
+async function readScreeningsPublic(sheetId) {
+  // Small delay ensures page referrer header is set before the API call
+  await new Promise(r => setTimeout(r, 200));
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:H?key=${GOOGLE_SHEETS_KEY}`;
+  const r = await fetch(url, {
+    headers: { "Referer": typeof window !== "undefined" ? window.location.origin : "" }
+  });
+  if(!r.ok) throw new Error(`Public read failed: ${r.status}`);
+  const d = await r.json();
+  if(!d.values) return [];
+  return d.values.map((row, i) => parseRow(row, i, sheetId)).filter(r=>r.theater);
+}
+
+function parseRow(row, i, sheetId) {
+  // Detect old 5-column format: Theater|Address|StartDate|EndDate|TicketURL
+  // vs new 8-column format: Theater|Address|City|State|ZIP|StartDate|EndDate|TicketURL
+  // A date looks like 2026-04-24; if col[2] is a date it's the old format
+  const isOldFormat = /^\d{4}-\d{2}-\d{2}$/.test(row[2]||"") || (!row[5] && !row[6]);
+  if (isOldFormat) {
+    return {
+      _rowIndex:i+1, id:`${sheetId}_${i}`,
+      theater:row[0]||"", address:row[1]||"",
+      city:"", state:"", zip:"",
+      startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
+      lat:null, lng:null,
+    };
+  }
+  return {
+    _rowIndex:i+1, id:`${sheetId}_${i}`,
+    theater:row[0]||"", address:row[1]||"",
+    city:row[2]||"", state:row[3]||"", zip:row[4]||"",
+    startDate:row[5]||"", endDate:row[6]||"", ticketUrl:row[7]||"",
+    lat:null, lng:null,
+  };
+}
+
 async function readScreenings(token, sheetId) {
+  if(!token) return readScreeningsPublic(sheetId);
   const d = await sheetsGet(token, sheetId, DATA_RANGE);
   if(!d.values) return [];
-  return d.values.map((row,i) => ({
-    _rowIndex: i+1, id:`${sheetId}_${i}`,
-    theater:row[0]||"", address:row[1]||"", startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
-    lat:null, lng:null,
-  }));
+  return d.values.map((row,i) => parseRow(row, i, sheetId));
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOOGLE DRIVE — create a new Sheet with a Screenings tab
+// ─────────────────────────────────────────────────────────────────────────────
+async function createFilmSheet(token, title) {
+  // Create the spreadsheet via Sheets API
+  const r = await fetch(`${SHEETS_BASE}`, {
+    method: "POST",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({
+      properties: { title: `${title} — Screenings` },
+      sheets: [{ properties: { title:"Screenings" } }]
+    }),
+  });
+  if(!r.ok) throw new Error(`Sheet creation failed: ${r.status}`);
+  const d = await r.json();
+  const sheetId = d.spreadsheetId;
+
+  // Write header row
+  await fetch(`${SHEETS_BASE}/${sheetId}/values/${encodeURIComponent(HDR_RANGE)}?valueInputOption=RAW`, {
+    method: "PUT",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({ values: HDR_VALUES }),
+  });
+
+  // Make it publicly readable (anyone with link can view)
+  await fetch(`https://www.googleapis.com/drive/v3/files/${sheetId}/permissions`, {
+    method: "POST",
+    headers: { Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({ role:"reader", type:"anyone" }),
+  });
+
+  return sheetId;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MASTER FILM LIST — read/write to master Sheet
+// ─────────────────────────────────────────────────────────────────────────────
+function parseFilmRows(values) {
+  return values
+    .filter(row => row[1] && row[2])
+    .filter(row => (row[3]||"yes").toLowerCase() !== "no")
+    .map((row) => {
+      const title = row[1].trim();
+      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+      const id = (row[0]||"").trim() || `film_${slug}`;
+      return { id, title, sheetId: row[2].trim() };
+    });
+}
+
+// Public film list read — uses Sheets key, no auth needed
+// Called by the widget so it can show any film without Sterling being signed in
+async function readFilmListPublic() {
+  if(MASTER_SHEET_ID.startsWith("YOUR_")) return [...FALLBACK_FILMS];
+  try {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${MASTER_SHEET_ID}/values/Films!A2:D?key=${GOOGLE_SHEETS_KEY}`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`Film list read failed: ${r.status}`);
+    const d = await r.json();
+    if(!d.values) return [...FALLBACK_FILMS];
+    return parseFilmRows(d.values);
+  } catch(e) {
+    console.warn("Could not read film list publicly:", e);
+    return [...FALLBACK_FILMS];
+  }
+}
+
+async function readFilmList(token) {
+  if(!token || MASTER_SHEET_ID.startsWith("YOUR_")) return [...FALLBACK_FILMS];
+  try {
+    await ensureFilmListHeader(token);
+    const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A2:D");
+    if(!d.values) return [...FALLBACK_FILMS];
+    return parseFilmRows(d.values);
+  } catch(e) {
+    console.warn("Could not read film list:", e);
+    return [...FALLBACK_FILMS];
+  }
+}
+
+async function ensureFilmListHeader(token) {
+  try {
+    const d = await sheetsGet(token, MASTER_SHEET_ID, "Films!A1:D1");
+    if(d.values?.[0]?.[0] === "ID") return;
+    await fetch(`${SHEETS_BASE}/${MASTER_SHEET_ID}/values/${encodeURIComponent("Films!A1:D1")}?valueInputOption=RAW`, {
+      method:"PUT", headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+      body: JSON.stringify({ values:[["ID","Title","Sheet ID","Active"]] }),
+    });
+  } catch(e) {}
+}
+
+async function addFilmToMaster(token, film) {
+  await sheetsAppend(token, MASTER_SHEET_ID, "Films!A2:D", [[film.id, film.title, film.sheetId, "yes"]]);
+}
+
+async function removeFilmFromMaster(token, rowIndex) {
+  const meta = await fetch(`${SHEETS_BASE}/${MASTER_SHEET_ID}?fields=sheets.properties`,
+    {headers:{Authorization:`Bearer ${token}`}}).then(r=>r.json());
+  const tab = meta.sheets?.find(sh=>sh.properties.title==="Films");
+  if(!tab) throw new Error("No Films tab");
+  await sheetsDelete(token, MASTER_SHEET_ID, tab.properties.sheetId, rowIndex);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,88 +499,140 @@ function useGoogleAuth() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INTERACTIVE MAP  (Leaflet + OpenStreetMap — free, no API key)
+// GOOGLE MAP COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
-function LeafletMap({ screenings, userPos, onMarkerClick, activeId }) {
+function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
   const mapRef    = useRef(null);
   const mapObj    = useRef(null);
   const markers   = useRef([]);
-  const userMkr   = useRef(null);
+  const infoRef   = useRef(null);
   const [mapErr,  setMapErr]  = useState(false);
   const [mapLoad, setMapLoad] = useState(true);
 
   // Init map
   useEffect(() => {
-    loadLeaflet()
-      .then(L => {
-        if(!mapRef.current || mapObj.current) return;
-        const map = L.map(mapRef.current, { center:[39.5,-98.35], zoom:4, zoomControl:true, attributionControl:true });
-        L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-          attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-          subdomains:"abcd", maxZoom:19,
-        }).addTo(map);
-        mapObj.current = map;
+    loadMaps()
+      .then(maps => {
+        if(!mapRef.current) return;
+        mapObj.current = new maps.Map(mapRef.current, {
+          center: { lat:39.5, lng:-98.35 },
+          zoom: 4,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          styles: [
+            { featureType:"all", elementType:"labels.text.fill", stylers:[{color:"#4a4037"}] },
+            { featureType:"water", elementType:"geometry", stylers:[{color:"#c9d8e8"}] },
+            { featureType:"landscape", elementType:"geometry", stylers:[{color:"#f0ece0"}] },
+            { featureType:"road", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"road.highway", elementType:"geometry", stylers:[{color:"#c8b89a"}] },
+            { featureType:"poi", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"transit", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
+            { featureType:"administrative", elementType:"geometry.stroke", stylers:[{color:"#c0b498"}] },
+          ],
+        });
+        infoRef.current = new maps.InfoWindow();
         setMapLoad(false);
       })
       .catch(() => { setMapErr(true); setMapLoad(false); });
   }, []);
 
+  const boundsFitRef = useRef(false); // only fit bounds once on initial load
+
   // Sync markers whenever screenings change
   useEffect(() => {
-    if(!mapObj.current || !window.L) return;
-    const L = window.L, map = mapObj.current;
+    if(!mapObj.current || !window.google?.maps) return;
+    const maps = window.google.maps;
 
-    markers.current.forEach(m => map.removeLayer(m));
+    // Clear old markers
+    markers.current.forEach(m => m.setMap(null));
     markers.current = [];
 
     const placed = screenings.filter(s => s.lat && s.lng);
     placed.forEach(s => {
       const isNear = userPos && parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)) < 80;
-      const isActive = activeId===s.id;
-      const sz = isActive ? 22 : 16;
-      const color = isNear ? "#b8942a" : "#8b1a1a";
-      const icon = L.divIcon({
-        className:"", iconSize:[sz,sz], iconAnchor:[sz/2,sz/2],
-        html:`<div style="width:${sz}px;height:${sz}px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35);transition:all .15s;${isActive?"transform:scale(1.15);":""}"></div>`,
+      const marker = new maps.Marker({
+        position: { lat:s.lat, lng:s.lng },
+        map: mapObj.current,
+        title: s.theater,
+        icon: {
+          path: maps.SymbolPath.CIRCLE,
+          scale: activeId===s.id ? 12 : 9,
+          fillColor: isNear ? "#b8942a" : "#8b1a1a",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2,
+        },
+        animation: activeId===s.id ? maps.Animation.BOUNCE : null,
+        zIndex: activeId===s.id ? 10 : 1,
       });
-      const marker = L.marker([s.lat,s.lng],{icon,zIndexOffset:isActive?1000:0}).addTo(map);
-      marker.bindPopup(`
-        <div style="font-family:'DM Mono',monospace;padding:6px 2px;min-width:180px">
-          <div style="font-family:'Cormorant Garamond',serif;font-size:16px;font-weight:600;margin-bottom:4px">${s.theater}</div>
-          <div style="font-size:10px;color:#7a7468;margin-bottom:8px;line-height:1.5">${s.address}</div>
-          <div style="font-size:10px;color:#333;margin-bottom:10px;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:5px 0">
-            ${fmtDate(s.startDate)} – ${fmtDate(s.endDate)}
+      marker.addListener("click", () => {
+        infoRef.current.setContent(`
+          <div style="font-family:'DM Mono',monospace;padding:6px 2px;min-width:180px">
+            <div style="font-family:'Cormorant Garamond',serif;font-size:16px;font-weight:600;margin-bottom:4px">${s.theater}</div>
+            <div style="font-size:10px;color:#7a7468;margin-bottom:8px;line-height:1.5">${s.address}</div>
+            <div style="font-size:10px;color:#333;margin-bottom:10px;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:5px 0">
+              ${fmtDate(s.startDate)} – ${fmtDate(s.endDate)}
+            </div>
+            ${userPos && s.lat ? `<div style="font-size:9px;color:#b8942a;margin-bottom:8px">📍 ${milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>` : ""}
+            <a href="${s.ticketUrl}" target="_blank" style="display:inline-block;background:#0d0d0d;color:white;font-size:9px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;text-decoration:none">Get Tickets →</a>
           </div>
-          ${userPos && s.lat ? `<div style="font-size:9px;color:#b8942a;margin-bottom:8px">📍 ${milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>` : ""}
-          <a href="${s.ticketUrl}" target="_blank" style="display:inline-block;background:#0d0d0d;color:white;font-size:9px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;text-decoration:none">Get Tickets →</a>
-        </div>`,{maxWidth:260});
-      marker.on("click",()=>onMarkerClick(s.id));
+        `);
+        infoRef.current.open(mapObj.current, marker);
+        onMarkerClick(s.id);
+      });
       markers.current.push(marker);
     });
 
-    if(placed.length > 0) {
-      const pts = placed.map(s=>[s.lat,s.lng]);
-      if(userPos) pts.push([userPos.lat,userPos.lng]);
-      map.fitBounds(pts,{padding:[40,40]});
-      if(placed.length===1) map.setZoom(12);
+    // Only fit bounds when we have new geocoded data — not on every activeId change
+    const shouldFitBounds = placed.length > 0 && !boundsFitRef.current;
+    const shouldRefitForUser = userPos && placed.length > 0;
+    if(shouldFitBounds || shouldRefitForUser) {
+      const bounds = new maps.LatLngBounds();
+      placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
+      if(userPos) bounds.extend(userPos);
+      mapObj.current.fitBounds(bounds, 48);
+      if(placed.length===1) mapObj.current.setZoom(12);
+      maps.event.addListenerOnce(mapObj.current, "idle", () => {
+        const z = mapObj.current.getZoom();
+        if(z < 4) mapObj.current.setZoom(4);
+        const c = mapObj.current.getCenter();
+        const lat = Math.max(24, Math.min(50, c.lat()));
+        const lng = Math.max(-130, Math.min(-60, c.lng()));
+        mapObj.current.setCenter({ lat, lng });
+      });
+      if(placed.length > 0) boundsFitRef.current = true;
+    } else if(placed.length === 0) {
+      mapObj.current.setCenter({ lat:39.5, lng:-98.35 });
+      mapObj.current.setZoom(4);
     }
   }, [screenings, userPos, activeId]);
 
   // User position marker
+  const userMarkerRef = useRef(null);
   useEffect(() => {
-    if(!mapObj.current || !window.L || !userPos) return;
-    const L = window.L, map = mapObj.current;
-    if(userMkr.current) map.removeLayer(userMkr.current);
-    const icon = L.divIcon({
-      className:"", iconSize:[12,12], iconAnchor:[6,6],
-      html:`<div style="width:12px;height:12px;border-radius:50%;background:#1a6ef5;border:2px solid #fff;box-shadow:0 0 0 4px rgba(26,110,245,.22)"></div>`,
+    if(!mapObj.current || !window.google?.maps || !userPos) return;
+    if(userMarkerRef.current) userMarkerRef.current.setMap(null);
+    userMarkerRef.current = new window.google.maps.Marker({
+      position: userPos,
+      map: mapObj.current,
+      title: "Your location",
+      icon: {
+        path: window.google.maps.SymbolPath.CIRCLE,
+        scale: 8,
+        fillColor: "#1a6ef5",
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+      },
+      zIndex: 20,
     });
-    userMkr.current = L.marker([userPos.lat,userPos.lng],{icon,zIndexOffset:2000}).addTo(map);
   }, [userPos]);
 
   if(mapErr) return (
     <div className="map-el" style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,background:"#e8e4dc",border:"1px solid var(--border)"}}>
-      <div style={{fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>Map failed to load</div>
+      <div style={{fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>Map unavailable in demo mode</div>
+      <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)"}}>Add a real Maps API key to enable</div>
     </div>
   );
 
@@ -519,7 +745,8 @@ function SetupBanner() {
     <div className="sbanner">
       <h4>⚙ One-time setup — replace placeholder keys in the file header</h4>
       <ol>
-        <li>Google Cloud Console → enable <code>Sheets API</code>, <code>Drive API</code></li>
+        <li>Google Cloud Console → enable <code>Maps JavaScript API</code>, <code>Geocoding API</code>, <code>Sheets API</code>, <code>Drive API</code></li>
+        <li>Create an API key → replace <code>GOOGLE_MAPS_KEY</code></li>
         <li>Create OAuth 2.0 credentials → replace <code>GOOGLE_CLIENT_ID</code></li>
         <li>Create one Sheet per film with a tab named <code>Screenings</code> → replace each <code>YOUR_SHEET_ID_*</code></li>
         <li>Add the Squarespace domain to <em>Authorized JavaScript Origins</em></li>
@@ -529,23 +756,131 @@ function SetupBanner() {
   );
 }
 
+// ── PLACES AUTOCOMPLETE HOOK ──────────────────────────────────────────────────
+function usePlacesAutocomplete(inputRef, onSelect) {
+  const acRef = useRef(null);
+  useEffect(() => {
+    if (!inputRef.current || demoMode()) return;
+    // Wait for Maps + Places to be ready before attaching autocomplete
+    loadMaps().then(() => {
+      if (!inputRef.current || acRef.current) return;
+      acRef.current = new window.google.maps.places.Autocomplete(inputRef.current, {
+        types: ["establishment", "geocode"],
+        fields: ["name", "formatted_address", "address_components", "geometry"],
+      });
+      acRef.current.addListener("place_changed", () => {
+        const place = acRef.current.getPlace();
+        if (!place.geometry) return;
+        const get = (type) => {
+          const comp = place.address_components?.find(c => c.types.includes(type));
+          return comp ? comp.short_name : "";
+        };
+        const streetNum = get("street_number");
+        const route     = get("route");
+        const city      = get("locality") || get("sublocality") || get("administrative_area_level_2");
+        const state     = get("administrative_area_level_1");
+        const zip       = get("postal_code");
+        const fullAddr  = [streetNum, route].filter(Boolean).join(" ") + `, ${city}, ${state} ${zip}`;
+        onSelect({
+          name:    place.name || "",
+          address: fullAddr.trim(),
+          city, state, zip,
+          lat: place.geometry.location.lat(),
+          lng: place.geometry.location.lng(),
+        });
+      });
+    }).catch(() => {}); // silently skip in demo mode
+    return () => {
+      if (acRef.current) {
+        window.google?.maps?.event.clearInstanceListeners(acRef.current);
+        acRef.current = null;
+      }
+    };
+  }, []);
+}
+
 function AddForm({ onSave, onCancel, saving }) {
-  const [f,setF] = useState({theater:"",address:"",startDate:"",endDate:"",ticketUrl:""});
-  const set = (k,v)=>setF(p=>({...p,[k]:v}));
-  const ok = f.theater&&f.address&&f.startDate&&f.endDate&&f.ticketUrl;
+  const [f, setF] = useState({ theater:"", address:"", city:"", state:"", zip:"", startDate:"", endDate:"", ticketUrl:"", lat:null, lng:null });
+  const [suggestions, setSuggestions] = useState([]);
+  const addrRef = useRef(null);
+  const set = (k,v) => setF(p => ({...p, [k]:v}));
+
+  // Wire up Places Autocomplete on the address input
+  const handlePlaceSelect = useCallback((place) => {
+    setF(p => ({
+      ...p,
+      theater: p.theater || place.name, // auto-fill theater name if empty
+      address: place.address,
+      city:    place.city,
+      state:   place.state,
+      zip:     place.zip,
+      lat:     place.lat,
+      lng:     place.lng,
+    }));
+  }, []);
+
+  usePlacesAutocomplete(addrRef, handlePlaceSelect);
+
+  const ok = f.theater && f.address && f.startDate && f.endDate && f.ticketUrl;
+
   return (
     <div className="fc">
       <h3>New Screening</h3>
       <div className="fg">
-        <div className="field"><label>Theater Name</label><input placeholder="e.g. IFC Center" value={f.theater} onChange={e=>set("theater",e.target.value)}/></div>
-        <div className="field"><label>Address or ZIP</label><input placeholder="Full address or ZIP code" value={f.address} onChange={e=>set("address",e.target.value)}/></div>
-        <div className="field"><label>Start Date</label><input type="date" value={f.startDate} onChange={e=>set("startDate",e.target.value)}/></div>
-        <div className="field"><label>End Date</label><input type="date" value={f.endDate} onChange={e=>set("endDate",e.target.value)}/></div>
-        <div className="field full"><label>Ticket Purchase URL</label><input placeholder="https://..." value={f.ticketUrl} onChange={e=>set("ticketUrl",e.target.value)}/></div>
+        <div className="field">
+          <label>Theater Name</label>
+          <input placeholder="e.g. IFC Center" value={f.theater} onChange={e=>set("theater",e.target.value)}/>
+        </div>
+        <div className="field" style={{position:"relative"}}>
+          <label>Address <span style={{color:"var(--gold)",fontSize:8,letterSpacing:".1em"}}> AUTOCOMPLETE</span></label>
+          <input
+            ref={addrRef}
+            placeholder="Start typing address or theater name…"
+            value={f.address}
+            onChange={e=>set("address",e.target.value)}
+            style={{paddingRight:28}}
+          />
+          {f.lat && f.lng && (
+            <span style={{position:"absolute",right:10,bottom:10,fontSize:12}} title="Location confirmed">✓</span>
+          )}
+        </div>
+        <div className="field">
+          <label>City</label>
+          <input placeholder="Auto-filled" value={f.city} onChange={e=>set("city",e.target.value)}/>
+        </div>
+        <div className="field" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div className="field">
+            <label>State</label>
+            <input placeholder="Auto" value={f.state} onChange={e=>set("state",e.target.value)}/>
+          </div>
+          <div className="field">
+            <label>ZIP</label>
+            <input placeholder="Auto" value={f.zip} onChange={e=>set("zip",e.target.value)}/>
+          </div>
+        </div>
+        <div className="field">
+          <label>Start Date</label>
+          <input type="date" value={f.startDate} onChange={e=>set("startDate",e.target.value)}/>
+        </div>
+        <div className="field">
+          <label>End Date</label>
+          <input type="date" value={f.endDate} onChange={e=>set("endDate",e.target.value)}/>
+        </div>
+        <div className="field full">
+          <label>Ticket Purchase URL</label>
+          <input placeholder="https://..." value={f.ticketUrl} onChange={e=>set("ticketUrl",e.target.value)}/>
+        </div>
       </div>
+      {f.lat && f.lng && (
+        <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--green)",letterSpacing:".12em",marginTop:8}}>
+          ✓ Location confirmed — geocoordinates captured ({f.lat.toFixed(4)}, {f.lng.toFixed(4)})
+        </div>
+      )}
       <div className="fa">
         <button className="btn btn-o" onClick={onCancel}>Cancel</button>
-        <button className="btn btn-g" disabled={!ok||saving} onClick={()=>onSave(f)}>{saving?"Saving…":"Save to Sheet"}</button>
+        <button className="btn btn-g" disabled={!ok||saving} onClick={()=>onSave(f)}>
+          {saving?"Saving…":"Save to Sheet"}
+        </button>
       </div>
     </div>
   );
@@ -554,7 +889,7 @@ function AddForm({ onSave, onCancel, saving }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function AdminView({ token, toast }) {
+function AdminView({ token, toast, films=FALLBACK_FILMS }) {
   const [fi, setFi]         = useState(0);
   const [rows, setRows]     = useState([]);
   const [loading, setLoading] = useState(false);
@@ -562,7 +897,7 @@ function AdminView({ token, toast }) {
   const [syncErr, setSyncErr] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
-  const film = FILM_SHEETS[fi];
+  const film = films[fi];
 
   const load = useCallback(async()=>{
     if(demoMode()||!token) { setRows(DEMO.slice(0,3)); setSync("Demo data — connect Google to sync"); return; }
@@ -584,7 +919,7 @@ function AdminView({ token, toast }) {
     }
     setSaving(true);
     try {
-      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.startDate,fd.endDate,fd.ticketUrl]]);
+      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.city||"",fd.state||"",fd.zip||"",fd.startDate,fd.endDate,fd.ticketUrl]]);
       await load(); setShowForm(false); toast("Saved to Google Sheets ✓");
     } catch{ toast("Save failed — check permissions.",true); }
     finally { setSaving(false); }
@@ -612,7 +947,7 @@ function AdminView({ token, toast }) {
       <div className="film-row">
         <span className="flbl">Film</span>
         <select className="fsel" value={fi} onChange={e=>{setFi(+e.target.value);setShowForm(false);}}>
-          {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+          {films.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
         </select>
         <button className="btn btn-g" onClick={()=>setShowForm(v=>!v)}>{showForm?"✕ Cancel":"+ Add Screening"}</button>
         <button className="btn btn-o" onClick={load} disabled={loading}>↻ Refresh</button>
@@ -630,7 +965,7 @@ function AdminView({ token, toast }) {
             return (
               <div className="tr" key={s.id||s._rowIndex}>
                 <div><div className="tn"><span className={`sd ${st}`}/>{s.theater}</div></div>
-                <div className="ta">{s.address}</div>
+                <div className="ta">{s.city && s.state ? `${s.city}, ${s.state}` : s.address}</div>
                 <div className="td">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
                 <a className="tl" href={s.ticketUrl} target="_blank" rel="noreferrer">{s.ticketUrl.replace(/^https?:\/\//,"").split("/")[0]}</a>
                 <button className="btn btn-d" onClick={()=>handleDelete(s)}>Remove</button>
@@ -646,9 +981,21 @@ function AdminView({ token, toast }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // WIDGET VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function WidgetView({ token, toast, defaultFilmIdx=0 }) {
-  const [fi, setFi]             = useState(defaultFilmIdx);
+function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
+  // Re-evaluate film index when master sheet loads — URL param may match a film
+  // not in the fallback list (e.g. film_american_agitators)
+  const getFilmIdx = (filmList) => {
+    if (!URL_FILM_ID) return defaultFilmIdx;
+    const idx = filmList.findIndex(f => f.id === URL_FILM_ID);
+    return idx >= 0 ? idx : defaultFilmIdx;
+  };
+  const [fi, setFi]             = useState(()=>getFilmIdx(films));
   const isEmbedded              = URL_MODE === "widget";
+
+  // Re-sync film index when films list updates from master sheet
+  useEffect(() => {
+    if(URL_FILM_ID) setFi(getFilmIdx(films));
+  }, [films]);
   const [screenings, setScreenings] = useState([]);
   const [filterStart, setFS]    = useState("");
   const [filterEnd, setFE]      = useState("");
@@ -656,26 +1003,40 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
   const [geoLoading, setGeoL]   = useState(false);
   const [loading, setLoading]   = useState(false);
   const [activeId, setActiveId] = useState(null);
-  const film = FILM_SHEETS[fi];
+  const [sheetError, setSheetError] = useState(null);
+  const film = films[fi];
 
   useEffect(()=>{
     let cancelled=false;
     (async()=>{
-      setLoading(true); setScreenings([]);
+      setLoading(true); setScreenings([]); setSheetError(null);
       let rows;
-      if(demoMode()||!token){ rows=[...DEMO]; }
-      else {
-        try{ rows=await readScreenings(token,film.sheetId); }
-        catch{ rows=[]; }
+      if(demoMode()){
+        rows=[...DEMO];
+      } else {
+        try{
+          rows=await readScreenings(token,film.sheetId);
+          if(rows.length===0) setSheetError("Sheet returned 0 rows — check the Screenings tab has data.");
+        } catch(e){
+          console.error("Sheet read failed:",e);
+          setSheetError(`Sheet read failed: ${e.message}. Check API key restrictions and Sheet sharing settings.`);
+          rows=[];
+        }
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
-      // Geocode each address
-      for(const s of rows){
-        if(s.lat&&s.lng) continue;
-        const g=await geocodeAddress(s.address).catch(()=>null);
-        if(!cancelled && g) setScreenings(p=>p.map(x=>x.id===s.id?{...x,...g}:x));
-        await new Promise(r=>setTimeout(r,demoMode()?320:80));
+      // Geocode all addresses in parallel, then do ONE state update at the end
+      // This prevents the map from re-fitting bounds on every single geocode result
+      const needsGeocode = rows.filter(s => !s.lat || !s.lng);
+      if(needsGeocode.length > 0) {
+        const results = await Promise.all(
+          needsGeocode.map(s => geocodeAddress(s.address).catch(()=>null))
+        );
+        if(!cancelled) {
+          const geoMap = {};
+          needsGeocode.forEach((s, i) => { if(results[i]) geoMap[s.id] = results[i]; });
+          setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
+        }
       }
     })();
     return()=>{cancelled=true;};
@@ -687,42 +1048,91 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
     return true;
   });
 
-  const withDist = filtered.map(s=>({
-    ...s,
-    distMi:(userPos&&s.lat&&s.lng)?parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)):null,
-  }));
-  const sorted = userPos ? [...withDist].sort((a,b)=>(a.distMi??9999)-(b.distMi??9999)) : withDist;
-  const nearIds = userPos ? sorted.filter(s=>s.distMi!==null&&s.distMi<80).map(s=>s.id) : [];
+  const { sorted, nearIds } = useMemo(() => {
+    const withDist = filtered.map(s => ({
+      ...s,
+      distMi: (userPos && s.lat && s.lng)
+        ? parseFloat(milesAway(userPos.lat, userPos.lng, s.lat, s.lng))
+        : null,
+    }));
+    const sorted = userPos
+      ? [...withDist].sort((a, b) => (a.distMi ?? 9999) - (b.distMi ?? 9999))
+      : withDist;
+    const nearIds = userPos
+      ? sorted.filter(s => s.distMi !== null && s.distMi < 80).map(s => s.id)
+      : [];
+    return { sorted, nearIds };
+  // Re-run whenever screenings update (geocoding fills in lat/lng) or userPos changes
+  }, [screenings, userPos, filterStart, filterEnd]);
 
   const handleGeo = ()=>{
     if(!navigator.geolocation){ toast("Geolocation not supported.",true); return; }
     setGeoL(true);
     navigator.geolocation.getCurrentPosition(
-      pos=>{ setUserPos({lat:pos.coords.latitude,lng:pos.coords.longitude}); setGeoL(false); toast("Showing theaters nearest you."); },
+      pos=>{
+        const pos2 = {lat:pos.coords.latitude, lng:pos.coords.longitude};
+        setUserPos(pos2);
+        setGeoL(false);
+        // Count how many theaters still need geocoding
+        const pending = screenings.filter(s=>!s.lat||!s.lng).length;
+        if(pending > 0){
+          toast(`Found you! Geocoding ${pending} theater${pending!==1?"s":""} — distances will update shortly.`);
+        } else {
+          toast("Showing theaters nearest you.");
+        }
+      },
       ()=>{ setGeoL(false); toast("Location access denied.",true); }
     );
   };
 
-  const MapComp = LeafletMap;
+  const MapComp = demoMode() ? StaticMap : GoogleMap;
 
   return (
     <div>
-      <div className="ph">
-        <h1>Public <em>Widget</em> Preview</h1>
-        <div className="ph-sub">As it will appear on the Squarespace site</div>
-      </div>
+      {!isEmbedded && (
+        <div className="ph">
+          <h1>Public <em>Widget</em> Preview</h1>
+          <div className="ph-sub">As it will appear on the Squarespace site</div>
+        </div>
+      )}
       {!isEmbedded && (
         <div className="film-row">
           <span className="flbl">Preview film</span>
           <select className="fsel" value={fi} onChange={e=>setFi(+e.target.value)}>
-            {FILM_SHEETS.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
+            {films.map((f,i)=><option key={f.id} value={i}>{f.title}</option>)}
           </select>
         </div>
       )}
 
       <div className="wwrap">
-        <div className="wt">{film.title}</div>
-        <div className="wtag">Now Playing · Select Theaters</div>
+        {sheetError && (
+          <div style={{
+            background:"#fef2f2",border:"1px solid #fca5a5",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#991b1b",
+            letterSpacing:".1em",lineHeight:1.7,
+          }}>
+            <strong>⚠ Sheet Error:</strong> {sheetError}
+          </div>
+        )}
+        <div className="wt">Find a Theater</div>
+        <div className="wtag">{film.title} · Now Playing</div>
+        {/* Debug panel — visible only when ?debug=1 is in the URL */}
+        {typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1" && (
+          <div style={{
+            background:"#0d0d0d",border:"1px solid #333",padding:"12px 16px",
+            marginBottom:16,fontFamily:"var(--mono)",fontSize:10,color:"#4caf76",
+            letterSpacing:".08em",lineHeight:2,
+          }}>
+            <div style={{color:"#b8942a",marginBottom:6,letterSpacing:".15em"}}>⚙ DEBUG INFO</div>
+            <div>Film: <span style={{color:"white"}}>{film.title}</span></div>
+            <div>Sheet ID: <span style={{color:"white"}}>{film.sheetId}</span></div>
+            <div>Token: <span style={{color:"white"}}>{token ? "✓ OAuth signed in" : "None (using API key)"}</span></div>
+            <div>Screenings loaded: <span style={{color:"white"}}>{screenings.length}</span></div>
+            <div>Demo mode: <span style={{color:"white"}}>{demoMode() ? "YES — replace placeholder keys" : "No"}</span></div>
+            <div>Sheet URL: <a href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Open Sheet ↗</a></div>
+            <div>API test: <a href={`https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Test API call ↗</a></div>
+          </div>
+        )}
 
         <div className="wf">
           <label>From</label>
@@ -742,7 +1152,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
         />
         {demoMode() && (
           <div className="map-key-note">
-            Demo mode — connect a Google Client ID to sync with your Sheets.
+            Demo map — add a real <code style={{fontFamily:"var(--mono)",fontSize:9,background:"#f0ece0",padding:"1px 4px"}}>GOOGLE_MAPS_KEY</code> for the full interactive map with satellite/street view.
           </div>
         )}
 
@@ -764,7 +1174,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
                 onClick={()=>setActiveId(activeId===s.id?null:s.id)}>
                 {nearIds.includes(s.id) && <div className="nbadge">Near You</div>}
                 <div className="wcn">{s.theater}</div>
-                <div className="wca">{s.address}</div>
+                <div className="wca">{s.city && s.state ? `${s.city}, ${s.state} ${s.zip}` : s.address}</div>
                 <div className="wcd">{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
                 {s.distMi!==null && <div className="wcdist">📍 {s.distMi} mi away</div>}
                 <a className="wctkt" href={s.ticketUrl} target="_blank" rel="noreferrer">Get Tickets →</a>
@@ -772,6 +1182,447 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
             ))}
           </div>
         )}
+
+        {/* Powered by footer */}
+        <div style={{
+          textAlign:"center",padding:"14px 0 6px",
+          fontFamily:"'DM Mono',monospace",fontSize:9,
+          color:"#9a9080",letterSpacing:".18em",
+          borderTop:"1px solid #c8c0b0",marginTop:4,
+        }}>
+          POWERED BY{" "}
+          <a href="https://abramorama.com" target="_blank" rel="noreferrer"
+            style={{color:"#9a9080",textDecoration:"none",fontWeight:500}}>AB2</a>
+          {" & "}
+          <a href="https://538marketing.com" target="_blank" rel="noreferrer"
+            style={{color:"#9a9080",textDecoration:"none",fontWeight:500}}>538 MARKETING</a>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMBED VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function EmbedView({ films=FALLBACK_FILMS }) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
+  const [copied, setCopied] = useState(null);
+
+  const copy = (id, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(id);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  };
+
+  const iframeCode = (filmId, filmTitle) =>
+`<!-- ${filmTitle} — Abramorama Screening Widget -->
+<iframe
+  src="${origin}?film=${filmId}&mode=widget"
+  width="100%"
+  height="680"
+  frameborder="0"
+  allow="geolocation"
+  style="border:none;display:block;width:100%"
+  title="${filmTitle} Screening Locations">
+</iframe>
+<script>
+  window.addEventListener("message", function(e) {
+    if (e.data && e.data.type === "abramorama-height") {
+      var iframes = document.querySelectorAll('iframe[title="${filmTitle} Screening Locations"]');
+      iframes.forEach(function(f){ f.style.height = e.data.height + "px"; });
+    }
+  });
+<\/script>`;
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Squarespace <em>Embed Code</em></h1>
+        <div className="ph-sub">Copy the snippet for each film page · paste into a Squarespace Code Block</div>
+      </div>
+
+      <div style={{marginBottom:12,fontFamily:"var(--mono)",fontSize:10,letterSpacing:".15em",color:"var(--muted)",textTransform:"uppercase"}}>
+        Detected app URL: <span style={{color:"var(--gold)"}}>{origin}</span>
+      </div>
+
+      {films.map(film => (
+        <div key={film.id} style={{marginBottom:32}}>
+          <div className="slbl">{film.title}</div>
+          <div style={{position:"relative"}}>
+            <pre style={{
+              background:"rgba(255,255,255,.03)",
+              border:"1px solid rgba(200,192,176,.18)",
+              padding:"20px 22px",
+              fontFamily:"var(--mono)",
+              fontSize:11,
+              lineHeight:1.75,
+              color:"rgba(245,240,232,.75)",
+              overflowX:"auto",
+              whiteSpace:"pre-wrap",
+              wordBreak:"break-all",
+            }}>
+              {iframeCode(film.id, film.title)}
+            </pre>
+            <button
+              className="btn btn-g"
+              onClick={() => copy(film.id, iframeCode(film.id, film.title))}
+              style={{position:"absolute",top:14,right:14,padding:"6px 14px",fontSize:9}}
+            >
+              {copied === film.id ? "✓ Copied!" : "Copy"}
+            </button>
+          </div>
+          <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".12em"}}>
+            Paste this into a <strong style={{color:"var(--paper)"}}>Code Block</strong> on the <strong style={{color:"var(--paper)"}}>{film.title}</strong> page in Squarespace.
+          </div>
+        </div>
+      ))}
+
+      <div style={{border:"1px solid rgba(184,148,42,.3)",background:"rgba(184,148,42,.05)",padding:"18px 22px",marginTop:8}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--gold)",marginBottom:10}}>
+          How to add a Code Block in Squarespace
+        </div>
+        <ol style={{paddingLeft:18,fontFamily:"var(--mono)",fontSize:10,color:"rgba(245,240,232,.65)",lineHeight:2.2,letterSpacing:".05em"}}>
+          <li>Open the film's page in the Squarespace editor</li>
+          <li>Click <strong style={{color:"var(--paper)"}}>+</strong> to add a block → choose <strong style={{color:"var(--paper)"}}>Code</strong></li>
+          <li>Paste the snippet above → click <strong style={{color:"var(--paper)"}}>Apply</strong></li>
+          <li>Save and preview — the map and theater list will appear</li>
+        </ol>
+      </div>
+
+      <div style={{marginTop:24,border:"1px solid rgba(200,192,176,.15)",padding:"16px 22px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:10}}>
+          Admin URL — share with Sterling
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <code style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--gold)",background:"rgba(255,255,255,.04)",padding:"8px 14px",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {origin}?mode=admin
+          </code>
+          <button className="btn btn-o" style={{fontSize:9,padding:"8px 14px"}}
+            onClick={() => copy("admin", `${origin}?mode=admin`)}>
+            {copied === "admin" ? "✓ Copied!" : "Copy"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FILM MANAGER VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function FilmManagerView({ token, films, setFilms, toast }) {
+  const [adding, setAdding]   = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [saveStep, setSaveStep] = useState("");
+  const [removing, setRemoving] = useState(null);
+  const [form, setForm]       = useState({ title:"", sheetId:"" });
+  const masterReady = !MASTER_SHEET_ID.startsWith("YOUR_");
+
+  const handleAdd = async () => {
+    if(!form.title) return;
+    setSaving(true); setSaveStep("Creating Google Sheet…");
+    try {
+      let sheetId = form.sheetId.trim();
+      if(!sheetId) {
+        if(!token) throw new Error("Sign in required to auto-create Sheet");
+        sheetId = await createFilmSheet(token, form.title.trim());
+        setSaveStep("Sheet created — saving film…");
+      }
+      const slug = form.title.trim().toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+      const newFilm = { id:`film_${slug}`, title:form.title.trim(), sheetId };
+      if(masterReady && token) await addFilmToMaster(token, newFilm);
+      FILM_SHEETS = [...films, newFilm];
+      setFilms([...films, newFilm]);
+      setForm({ title:"", sheetId:"" });
+      setAdding(false);
+      toast(`"${newFilm.title}" added — Sheet ready.`);
+    } catch(e) {
+      toast("Failed to save film.", true);
+    } finally { setSaving(false); }
+  };
+
+  const handleRemove = async (film, idx) => {
+    setRemoving(film.id);
+    try {
+      if(masterReady && token) await removeFilmFromMaster(token, idx + 1);
+      const updated = films.filter(f => f.id !== film.id);
+      FILM_SHEETS = updated;
+      setFilms(updated);
+      toast(`"${film.title}" removed.`);
+    } catch(e) {
+      toast("Failed to remove film.", true);
+    } finally { setRemoving(null); }
+  };
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Film <em>Manager</em></h1>
+        <div className="ph-sub">Add or remove films — each film links to its own Google Sheet</div>
+      </div>
+
+      {!masterReady && (
+        <div className="sbanner" style={{marginBottom:24}}>
+          <h4>⚙ Set up a master Sheet to persist film changes</h4>
+          <ol>
+            <li>Create a new Google Sheet → rename the default tab to <code>Films</code></li>
+            <li>Copy the Sheet ID from its URL</li>
+            <li>Replace <code>YOUR_MASTER_SHEET_ID</code> in the app file with that ID</li>
+            <li>Until then, films added here persist only for this session</li>
+          </ol>
+          <button className="dismiss" onClick={()=>{}}>Got it</button>
+        </div>
+      )}
+
+      <div className="slbl">Active Films ({films.length})</div>
+
+      <div className="tbl" style={{marginBottom:28}}>
+        <div className="tr hdr">
+          <span>Title</span><span>Sheet ID</span><span>Sheet Link</span><span>Screenings</span><span></span>
+        </div>
+        {films.map((film, idx) => (
+          <div className="tr" key={film.id}>
+            <div className="tn">{film.title}</div>
+            <div className="ta" style={{fontFamily:"var(--mono)",fontSize:10}}>{film.sheetId.slice(0,24)}…</div>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Open Sheet ↗</a>
+            <a
+              href={`?film=${film.id}&mode=widget`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Preview widget ↗</a>
+            <button
+              className="btn btn-d"
+              disabled={removing === film.id}
+              onClick={() => handleRemove(film, idx)}
+            >{removing===film.id ? "…" : "Remove"}</button>
+          </div>
+        ))}
+      </div>
+
+      {adding ? (
+        <div className="fc">
+          <h3>Add New Film</h3>
+          <div className="fg">
+            <div className="field full">
+              <label>Film Title</label>
+              <input
+                placeholder="e.g. Ghost Elephants"
+                value={form.title}
+                onChange={e=>setForm(p=>({...p,title:e.target.value}))}
+              />
+            </div>
+            <div className="field full">
+              <label>Google Sheet ID <span style={{color:"var(--green)",fontSize:8,letterSpacing:".1em"}}> OPTIONAL — leave blank to auto-create</span></label>
+              <input
+                placeholder="Leave blank to auto-create Sheet, or paste existing Sheet ID"
+                value={form.sheetId}
+                onChange={e=>setForm(p=>({...p,sheetId:e.target.value}))}
+              />
+            </div>
+          </div>
+          {!form.sheetId && token && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--green)",letterSpacing:".1em",lineHeight:1.8}}>
+              ✓ A new Google Sheet will be created automatically, named "{form.title||"Film Title"} — Screenings",
+              with the correct headers and public sharing already set up.
+            </div>
+          )}
+          {!form.sheetId && !token && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"#e74c3c",letterSpacing:".1em"}}>
+              ⚠ Sign in with Google to enable auto-create, or paste an existing Sheet ID above.
+            </div>
+          )}
+          {saveStep && (
+            <div style={{marginTop:8,fontFamily:"var(--mono)",fontSize:9,color:"var(--gold)",letterSpacing:".1em"}}>
+              <span style={{animation:"spin .7s linear infinite",display:"inline-block",marginRight:6}}>⟳</span>
+              {saveStep}
+            </div>
+          )}
+          <div className="fa">
+            <button className="btn btn-o" onClick={()=>setAdding(false)}>Cancel</button>
+            <button
+              className="btn btn-g"
+              disabled={!form.title||saving}
+              onClick={handleAdd}
+            >{saving ? saveStep||"Working…" : "Add Film"}</button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn btn-g" onClick={()=>setAdding(true)}>+ Add New Film</button>
+      )}
+
+      <div style={{marginTop:36,border:"1px solid rgba(200,192,176,.15)",padding:"18px 22px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:12}}>
+          Squarespace embed codes for active films
+        </div>
+        {films.map(film => {
+          const origin = typeof window!=="undefined" ? window.location.origin : "https://abramorama-widget.vercel.app";
+          const snippet = `<iframe src="${origin}?film=${film.id}&mode=widget" width="100%" height="900" frameborder="0" scrolling="yes" allow="geolocation" style="width:100%;min-height:900px;border:none;display:block;"></iframe>`;
+          return (
+            <div key={film.id} style={{marginBottom:14}}>
+              <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--gold)",letterSpacing:".12em",marginBottom:4}}>{film.title}</div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <code style={{fontFamily:"var(--mono)",fontSize:9,color:"rgba(245,240,232,.5)",background:"rgba(255,255,255,.03)",padding:"6px 10px",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {snippet}
+                </code>
+                <button className="btn btn-o" style={{fontSize:9,padding:"6px 12px",flexShrink:0}}
+                  onClick={()=>{navigator.clipboard.writeText(snippet);toast(`Copied embed for ${film.title}`);}}>
+                  Copy
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEALTH CHECK VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function HealthCheckView({ films }) {
+  const [results, setResults] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [lastRun, setLastRun] = useState(null);
+
+  const runChecks = async () => {
+    setRunning(true);
+    setResults(films.map(f => ({ ...f, status:"checking", rowCount:null, error:null })));
+
+    const checks = films.map(async (film) => {
+      try {
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:H?key=${GOOGLE_SHEETS_KEY}`;
+        const r = await fetch(url);
+        if(!r.ok) {
+          const d = await r.json().catch(()=>({}));
+          return { ...film, status:"error", error:`HTTP ${r.status}: ${d?.error?.message||"Unknown error"}`, rowCount:null };
+        }
+        const d = await r.json();
+        const rows = (d.values||[]).filter(row=>row[0]);
+        // Check for upcoming screenings
+        const today = new Date().toISOString().slice(0,10);
+        const upcoming = rows.filter(row => (row[6]||row[3]||"") >= today);
+        return {
+          ...film,
+          status: rows.length === 0 ? "empty" : "ok",
+          rowCount: rows.length,
+          upcomingCount: upcoming.length,
+          error: null,
+        };
+      } catch(e) {
+        return { ...film, status:"error", error:e.message, rowCount:null };
+      }
+    });
+
+    const res = await Promise.all(checks);
+    setResults(res);
+    setRunning(false);
+    setLastRun(new Date().toLocaleTimeString());
+  };
+
+  useEffect(() => { if(films.length > 0) runChecks(); }, [films]);
+
+  const statusColor = s => ({ ok:"var(--green)", error:"#e74c3c", empty:"var(--gold)", checking:"var(--muted)" })[s]||"var(--muted)";
+  const statusIcon  = s => ({ ok:"✓", error:"✕", empty:"⚠", checking:"⟳" })[s]||"?";
+  const statusLabel = (r) => {
+    if(r.status==="checking") return "Checking…";
+    if(r.status==="error") return r.error;
+    if(r.status==="empty") return "Sheet accessible but no screenings found";
+    return `${r.rowCount} screening${r.rowCount!==1?"s":""} · ${r.upcomingCount} upcoming`;
+  };
+
+  const allOk     = results.length > 0 && results.every(r=>r.status==="ok");
+  const hasErrors = results.some(r=>r.status==="error");
+
+  return (
+    <div>
+      <div className="ph">
+        <h1>Health <em>Check</em></h1>
+        <div className="ph-sub">Real-time status of every film Sheet</div>
+      </div>
+
+      {/* Summary banner */}
+      {results.length > 0 && !running && (
+        <div style={{
+          border:`1px solid ${hasErrors?"rgba(231,76,60,.4)":"rgba(76,175,118,.4)"}`,
+          background:hasErrors?"rgba(231,76,60,.06)":"rgba(76,175,118,.06)",
+          padding:"14px 20px", marginBottom:24, display:"flex",
+          alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12,
+        }}>
+          <div style={{fontFamily:"var(--serif)",fontSize:"1.1rem",fontWeight:300,fontStyle:"italic",color:hasErrors?"#e74c3c":"var(--green)"}}>
+            {hasErrors ? `${results.filter(r=>r.status==="error").length} film${results.filter(r=>r.status==="error").length!==1?"s":""} need attention` : "All films are live and reading correctly"}
+          </div>
+          <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)",letterSpacing:".12em"}}>
+            Last checked: {lastRun}
+          </div>
+        </div>
+      )}
+
+      {/* Film status list */}
+      <div className="tbl" style={{marginBottom:28}}>
+        <div className="tr hdr">
+          <span>Film</span><span>Status</span><span>Screenings</span><span>Sheet</span><span>Widget</span>
+        </div>
+        {results.length === 0 ? (
+          <div className="empty"><div className="big">⟳</div><p>Running checks…</p></div>
+        ) : results.map(r => (
+          <div className="tr" key={r.id}>
+            <div className="tn">{r.title}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <span style={{
+                width:8,height:8,borderRadius:"50%",background:statusColor(r.status),
+                display:"inline-block",flexShrink:0,
+                animation:r.status==="checking"?"spin .7s linear infinite":undefined,
+              }}/>
+              <span style={{fontFamily:"var(--mono)",fontSize:10,color:statusColor(r.status),letterSpacing:".1em"}}>
+                {r.status.toUpperCase()}
+              </span>
+            </div>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:r.status==="error"?"#e74c3c":"var(--muted)",letterSpacing:".08em",lineHeight:1.6}}>
+              {statusLabel(r)}
+            </div>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${r.sheetId}`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Open Sheet ↗</a>
+            <a
+              href={`?film=${r.id}&mode=widget`}
+              target="_blank" rel="noreferrer"
+              className="tl"
+            >Preview ↗</a>
+          </div>
+        ))}
+      </div>
+
+      <button className="btn btn-g" onClick={runChecks} disabled={running}>
+        {running ? "⟳ Checking…" : "↻ Re-run Checks"}
+      </button>
+
+      {/* Troubleshooting guide */}
+      <div style={{marginTop:32,border:"1px solid rgba(200,192,176,.15)",padding:"20px 24px"}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:10,letterSpacing:".18em",textTransform:"uppercase",color:"var(--muted)",marginBottom:14}}>
+          Troubleshooting Guide
+        </div>
+        {[
+          { status:"HTTP 400", fix:'Sheet tab is not named "Screenings" — open the Sheet, right-click the tab at the bottom and rename it exactly: Screenings' },
+          { status:"HTTP 403", fix:'Sheet is not shared publicly — open the Sheet → Share → General access → Anyone with the link → Viewer' },
+          { status:"HTTP 404", fix:'Sheet ID is wrong — check the Films tab and compare the ID to the URL of the actual Sheet' },
+          { status:"Empty Sheet", fix:'No screenings added yet — open Admin tab, select the film, and add screenings' },
+          { status:"Widget shows wrong film", fix:'Check the embed code film param — should match the film ID shown in the Films tab' },
+        ].map(item => (
+          <div key={item.status} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid rgba(200,192,176,.1)"}}>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:"#e74c3c",letterSpacing:".12em",marginBottom:4}}>{item.status}</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:"rgba(245,240,232,.6)",lineHeight:1.7,letterSpacing:".05em"}}>{item.fix}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -781,18 +1632,33 @@ function WidgetView({ token, toast, defaultFilmIdx=0 }) {
 // ROOT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
-  // If ?mode=widget is in the URL (Squarespace embed), lock to widget view
   const [mode, setMode] = useState(URL_MODE === "widget" ? "widget" : "admin");
   const isEmbedded = URL_MODE === "widget";
 
-  // Post height to parent iframe on every render (for Squarespace auto-resize)
   useEffect(() => { postHeight(); });
 
   const { token, user, loading:authLoading, signIn, signOut } = useGoogleAuth();
   const [toastMsg, setToast] = useState(null);
   const [toastErr, setTE]    = useState(false);
+  const [films, setFilms]    = useState([...FALLBACK_FILMS]);
 
   const toast = (msg,isErr=false)=>{ setToast(null); setTimeout(()=>{ setToast(msg); setTE(isErr); },10); };
+
+  // Load film list publicly on startup — no sign-in needed
+  // This lets the widget show any film including ones added via Film Manager
+  useEffect(() => {
+    readFilmListPublic().then(list => {
+      if(list.length > 0) { FILM_SHEETS = list; setFilms(list); }
+    }).catch(()=>{});
+  }, []);
+
+  // Reload film list from master sheet when signed in (gets write access too)
+  useEffect(() => {
+    if(!token) return;
+    readFilmList(token).then(list => {
+      if(list.length > 0) { FILM_SHEETS = list; setFilms(list); }
+    }).catch(()=>{});
+  }, [token]);
 
   return (
     <>
@@ -803,8 +1669,11 @@ export default function App() {
           {!isEmbedded && (
             <div className="nav-r">
               <div className="tabs">
-                <button className={`tab ${mode==="admin"?"on":""}`} onClick={()=>setMode("admin")}>Admin</button>
+                <button className={`tab ${mode==="admin"?"on":""}`}  onClick={()=>setMode("admin")}>Admin</button>
                 <button className={`tab ${mode==="widget"?"on":""}`} onClick={()=>setMode("widget")}>Widget Preview</button>
+                <button className={`tab ${mode==="films"?"on":""}`}  onClick={()=>setMode("films")}>Films</button>
+                <button className={`tab ${mode==="embed"?"on":""}`}  onClick={()=>setMode("embed")}>Embed Code</button>
+                <button className={`tab ${mode==="health"?"on":""}`} onClick={()=>setMode("health")}>Health</button>
               </div>
               {token ? (
                 <>
@@ -823,9 +1692,11 @@ export default function App() {
           )}
         </nav>
         <div className="main">
-          {mode==="admin"
-            ? <AdminView token={token} toast={toast}/>
-            : <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX}/>}
+          {mode==="admin"  && <AdminView token={token} toast={toast} films={films}/>}
+          {mode==="widget" && <WidgetView token={token} toast={toast} defaultFilmIdx={URL_FILM_IDX} films={films}/>}
+          {mode==="films"  && <FilmManagerView token={token} films={films} setFilms={setFilms} toast={toast}/>}
+          {mode==="embed"  && <EmbedView films={films}/>}
+          {mode==="health" && <HealthCheckView films={films}/>}
         </div>
         {toastMsg && <Toast msg={toastMsg} isErr={toastErr} onDone={()=>setToast(null)}/>}
       </div>
