@@ -36,9 +36,9 @@ function postHeight() {
 
 const SCOPES      = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive";
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
-const DATA_RANGE  = "Screenings!A2:H";
-const HDR_RANGE   = "Screenings!A1:H1";
-const HDR_VALUES  = [["Theater","Address","City","State","ZIP","Start Date","End Date","Ticket URL"]];
+const DATA_RANGE  = "Screenings!A2:J";
+const HDR_RANGE   = "Screenings!A1:J1";
+const HDR_VALUES  = [["Theater","Address","City","State","ZIP","Start Date","End Date","Ticket URL","Lat","Lng"]];
 
 // Demo data shown before real credentials are wired up
 const DEMO = [
@@ -303,7 +303,7 @@ async function ensureHeader(token, sheetId) {
 async function readScreeningsPublic(sheetId) {
   // Small delay ensures page referrer header is set before the API call
   await new Promise(r => setTimeout(r, 200));
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:H?key=${GOOGLE_SHEETS_KEY}`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Screenings!A2:J?key=${GOOGLE_SHEETS_KEY}`;
   const r = await fetch(url, {
     headers: { "Referer": typeof window !== "undefined" ? window.location.origin : "" }
   });
@@ -315,16 +315,17 @@ async function readScreeningsPublic(sheetId) {
 
 function parseRow(row, i, sheetId) {
   // Detect old 5-column format: Theater|Address|StartDate|EndDate|TicketURL
-  // vs new 8-column format: Theater|Address|City|State|ZIP|StartDate|EndDate|TicketURL
-  // A date looks like 2026-04-24; if col[2] is a date it's the old format
+  // vs new 8-column format: Theater|Address|City|State|ZIP|StartDate|EndDate|TicketURL|Lat|Lng
   const isOldFormat = /^\d{4}-\d{2}-\d{2}$/.test(row[2]||"") || (!row[5] && !row[6]);
+  const storedLat = parseFloat(row[8]||"") || null;
+  const storedLng = parseFloat(row[9]||"") || null;
   if (isOldFormat) {
     return {
       _rowIndex:i+1, id:`${sheetId}_${i}`,
       theater:row[0]||"", address:row[1]||"",
       city:"", state:"", zip:"",
       startDate:row[2]||"", endDate:row[3]||"", ticketUrl:row[4]||"",
-      lat:null, lng:null,
+      lat:storedLat, lng:storedLng,
     };
   }
   return {
@@ -332,7 +333,7 @@ function parseRow(row, i, sheetId) {
     theater:row[0]||"", address:row[1]||"",
     city:row[2]||"", state:row[3]||"", zip:row[4]||"",
     startDate:row[5]||"", endDate:row[6]||"", ticketUrl:row[7]||"",
-    lat:null, lng:null,
+    lat:storedLat, lng:storedLng,
   };
 }
 
@@ -499,147 +500,130 @@ function useGoogleAuth() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GOOGLE MAP COMPONENT
+// LEAFLET MAP (free, no API charges — used in public widget)
 // ─────────────────────────────────────────────────────────────────────────────
-function GoogleMap({ screenings, userPos, onMarkerClick, activeId }) {
+let leafletPromise = null;
+function loadLeaflet() {
+  if(leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve) => {
+    if(window.L) { resolve(window.L); return; }
+    // Load Leaflet CSS
+    if(!document.getElementById("leaflet-css")) {
+      const link = document.createElement("link");
+      link.id = "leaflet-css";
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(link);
+    }
+    // Load Leaflet JS
+    const s = document.createElement("script");
+    s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    s.onload = () => resolve(window.L);
+    document.head.appendChild(s);
+  });
+  return leafletPromise;
+}
+
+function LeafletMap({ screenings, userPos, onMarkerClick, activeId }) {
   const mapRef    = useRef(null);
   const mapObj    = useRef(null);
   const markers   = useRef([]);
-  const infoRef   = useRef(null);
-  const [mapErr,  setMapErr]  = useState(false);
-  const [mapLoad, setMapLoad] = useState(true);
+  const userMarker = useRef(null);
+  const [ready, setReady] = useState(false);
 
-  // Init map
+  // Init Leaflet map
   useEffect(() => {
-    loadMaps()
-      .then(maps => {
-        if(!mapRef.current) return;
-        mapObj.current = new maps.Map(mapRef.current, {
-          center: { lat:39.5, lng:-98.35 },
-          zoom: 4,
-          mapTypeControl: false,
-          streetViewControl: false,
-          fullscreenControl: false,
-          styles: [
-            { featureType:"all", elementType:"labels.text.fill", stylers:[{color:"#4a4037"}] },
-            { featureType:"water", elementType:"geometry", stylers:[{color:"#c9d8e8"}] },
-            { featureType:"landscape", elementType:"geometry", stylers:[{color:"#f0ece0"}] },
-            { featureType:"road", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
-            { featureType:"road.highway", elementType:"geometry", stylers:[{color:"#c8b89a"}] },
-            { featureType:"poi", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
-            { featureType:"transit", elementType:"geometry", stylers:[{color:"#ddd5c0"}] },
-            { featureType:"administrative", elementType:"geometry.stroke", stylers:[{color:"#c0b498"}] },
-          ],
-        });
-        infoRef.current = new maps.InfoWindow();
-        setMapLoad(false);
-      })
-      .catch(() => { setMapErr(true); setMapLoad(false); });
+    loadLeaflet().then(L => {
+      if(!mapRef.current || mapObj.current) return;
+      mapObj.current = L.map(mapRef.current, {
+        center: [39.5, -98.35],
+        zoom: 4,
+        zoomControl: true,
+        scrollWheelZoom: false,
+      });
+      // OpenStreetMap tile layer — completely free, no API key
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 18,
+      }).addTo(mapObj.current);
+      setReady(true);
+    });
+    return () => {
+      if(mapObj.current) { mapObj.current.remove(); mapObj.current = null; }
+    };
   }, []);
 
-  const boundsFitRef = useRef(false); // only fit bounds once on initial load
-
-  // Sync markers whenever screenings change
+  // Sync markers when screenings or userPos changes
   useEffect(() => {
-    if(!mapObj.current || !window.google?.maps) return;
-    const maps = window.google.maps;
+    if(!ready || !mapObj.current || !window.L) return;
+    const L = window.L;
 
     // Clear old markers
-    markers.current.forEach(m => m.setMap(null));
+    markers.current.forEach(m => mapObj.current.removeLayer(m));
     markers.current = [];
 
     const placed = screenings.filter(s => s.lat && s.lng);
+
     placed.forEach(s => {
-      const isNear = userPos && parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng)) < 80;
-      const marker = new maps.Marker({
-        position: { lat:s.lat, lng:s.lng },
-        map: mapObj.current,
-        title: s.theater,
-        icon: {
-          path: maps.SymbolPath.CIRCLE,
-          scale: activeId===s.id ? 12 : 9,
-          fillColor: isNear ? "#b8942a" : "#8b1a1a",
-          fillOpacity: 1,
-          strokeColor: "#ffffff",
-          strokeWeight: 2,
-        },
-        animation: activeId===s.id ? maps.Animation.BOUNCE : null,
-        zIndex: activeId===s.id ? 10 : 1,
+      const isNear = userPos && parseFloat(milesAway(userPos.lat, userPos.lng, s.lat, s.lng)) < 80;
+      const isActive = activeId === s.id;
+      const color = isNear ? "#b8942a" : "#8b1a1a";
+      const size = isActive ? 16 : 12;
+
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:${size}px;height:${size}px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:${color};border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,.35);transition:all .15s"></div>`,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size],
+        popupAnchor: [0, -size],
       });
-      marker.addListener("click", () => {
-        infoRef.current.setContent(`
-          <div style="font-family:'DM Mono',monospace;padding:6px 2px;min-width:180px">
-            <div style="font-family:'Cormorant Garamond',serif;font-size:16px;font-weight:600;margin-bottom:4px">${s.theater}</div>
+
+      const marker = L.marker([s.lat, s.lng], { icon })
+        .addTo(mapObj.current)
+        .bindPopup(`
+          <div style="font-family:'DM Mono',monospace;min-width:180px;padding:4px 0">
+            <div style="font-family:'Cormorant Garamond',serif;font-size:15px;font-weight:600;margin-bottom:4px">${s.theater}</div>
             <div style="font-size:10px;color:#7a7468;margin-bottom:8px;line-height:1.5">${s.address}</div>
-            <div style="font-size:10px;color:#333;margin-bottom:10px;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:5px 0">
+            <div style="font-size:10px;color:#333;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:5px 0;margin-bottom:8px">
               ${fmtDate(s.startDate)} – ${fmtDate(s.endDate)}
             </div>
-            ${userPos && s.lat ? `<div style="font-size:9px;color:#b8942a;margin-bottom:8px">📍 ${milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>` : ""}
+            ${userPos ? `<div style="font-size:9px;color:#b8942a;margin-bottom:8px">📍 ${milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>` : ""}
             <a href="${s.ticketUrl}" target="_blank" style="display:inline-block;background:#0d0d0d;color:white;font-size:9px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;text-decoration:none">Get Tickets →</a>
           </div>
-        `);
-        infoRef.current.open(mapObj.current, marker);
-        onMarkerClick(s.id);
-      });
+        `, { maxWidth: 260 });
+
+      marker.on("click", () => onMarkerClick(s.id));
+      if(isActive) setTimeout(() => marker.openPopup(), 100);
       markers.current.push(marker);
     });
 
-    // Only fit bounds when we have new geocoded data — not on every activeId change
-    const shouldFitBounds = placed.length > 0 && !boundsFitRef.current;
-    const shouldRefitForUser = userPos && placed.length > 0;
-    if(shouldFitBounds || shouldRefitForUser) {
-      const bounds = new maps.LatLngBounds();
-      placed.forEach(s => bounds.extend({ lat:s.lat, lng:s.lng }));
-      if(userPos) bounds.extend(userPos);
-      mapObj.current.fitBounds(bounds, 48);
-      if(placed.length===1) mapObj.current.setZoom(12);
-      maps.event.addListenerOnce(mapObj.current, "idle", () => {
-        const z = mapObj.current.getZoom();
-        if(z < 4) mapObj.current.setZoom(4);
-        const c = mapObj.current.getCenter();
-        const lat = Math.max(24, Math.min(50, c.lat()));
-        const lng = Math.max(-130, Math.min(-60, c.lng()));
-        mapObj.current.setCenter({ lat, lng });
-      });
-      if(placed.length > 0) boundsFitRef.current = true;
-    } else if(placed.length === 0) {
-      mapObj.current.setCenter({ lat:39.5, lng:-98.35 });
-      mapObj.current.setZoom(4);
+    // Fit bounds to all placed theaters
+    if(placed.length > 0) {
+      const bounds = L.latLngBounds(placed.map(s => [s.lat, s.lng]));
+      if(userPos) bounds.extend([userPos.lat, userPos.lng]);
+      mapObj.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 });
     }
-  }, [screenings, userPos, activeId]);
+  }, [ready, screenings, userPos, activeId]);
 
-  // User position marker
-  const userMarkerRef = useRef(null);
+  // User location marker
   useEffect(() => {
-    if(!mapObj.current || !window.google?.maps || !userPos) return;
-    if(userMarkerRef.current) userMarkerRef.current.setMap(null);
-    userMarkerRef.current = new window.google.maps.Marker({
-      position: userPos,
-      map: mapObj.current,
-      title: "Your location",
-      icon: {
-        path: window.google.maps.SymbolPath.CIRCLE,
-        scale: 8,
-        fillColor: "#1a6ef5",
-        fillOpacity: 1,
-        strokeColor: "#ffffff",
-        strokeWeight: 2,
-      },
-      zIndex: 20,
+    if(!ready || !mapObj.current || !window.L || !userPos) return;
+    const L = window.L;
+    if(userMarker.current) mapObj.current.removeLayer(userMarker.current);
+    const icon = L.divIcon({
+      className: "",
+      html: `<div style="width:12px;height:12px;border-radius:50%;background:#1a6ef5;border:2px solid white;box-shadow:0 0 0 4px rgba(26,110,245,.25)"></div>`,
+      iconSize: [12, 12],
+      iconAnchor: [6, 6],
     });
-  }, [userPos]);
-
-  if(mapErr) return (
-    <div className="map-el" style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,background:"#e8e4dc",border:"1px solid var(--border)"}}>
-      <div style={{fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>Map unavailable in demo mode</div>
-      <div style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--muted)"}}>Add a real Maps API key to enable</div>
-    </div>
-  );
+    userMarker.current = L.marker([userPos.lat, userPos.lng], { icon, zIndexOffset: 1000 })
+      .addTo(mapObj.current);
+  }, [ready, userPos]);
 
   return (
     <div className="map-wrap">
       <div ref={mapRef} className="map-el" />
-      {mapLoad && (
+      {!ready && (
         <div className="map-loading"><span className="spin">⟳</span> Loading map…</div>
       )}
     </div>
@@ -919,7 +903,7 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
     }
     setSaving(true);
     try {
-      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.city||"",fd.state||"",fd.zip||"",fd.startDate,fd.endDate,fd.ticketUrl]]);
+      await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.city||"",fd.state||"",fd.zip||"",fd.startDate,fd.endDate,fd.ticketUrl,fd.lat||"",fd.lng||""]]);
       await load(); setShowForm(false); toast("Saved to Google Sheets ✓");
     } catch{ toast("Save failed — check permissions.",true); }
     finally { setSaving(false); }
@@ -1025,17 +1009,42 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
-      // Geocode all addresses in parallel, then do ONE state update at the end
-      // This prevents the map from re-fitting bounds on every single geocode result
+      // Only geocode rows that don't already have coordinates stored in the Sheet
+      // Stored coordinates = zero API charges on page load
       const needsGeocode = rows.filter(s => !s.lat || !s.lng);
-      if(needsGeocode.length > 0) {
+      if(needsGeocode.length > 0 && !demoMode()) {
+        // Use Nominatim (free) for geocoding remaining addresses — no API charge
         const results = await Promise.all(
-          needsGeocode.map(s => geocodeAddress(s.address).catch(()=>null))
+          needsGeocode.map(s =>
+            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(s.address)}&limit=1`, {headers:{"Accept-Language":"en"}})
+              .then(r=>r.json())
+              .then(d => d.length ? {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon)} : null)
+              .catch(()=>null)
+          )
         );
         if(!cancelled) {
           const geoMap = {};
           needsGeocode.forEach((s, i) => { if(results[i]) geoMap[s.id] = results[i]; });
-          setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
+          if(Object.keys(geoMap).length > 0) {
+            setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
+          }
+        }
+      } else if(needsGeocode.length > 0 && demoMode()) {
+        // Demo mode — use Nominatim too (still free)
+        const results = await Promise.all(
+          needsGeocode.map(s =>
+            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(s.address)}&limit=1`, {headers:{"Accept-Language":"en"}})
+              .then(r=>r.json())
+              .then(d => d.length ? {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon)} : null)
+              .catch(()=>null)
+          )
+        );
+        if(!cancelled) {
+          const geoMap = {};
+          needsGeocode.forEach((s, i) => { if(results[i]) geoMap[s.id] = results[i]; });
+          if(Object.keys(geoMap).length > 0) {
+            setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
+          }
         }
       }
     })();
@@ -1085,7 +1094,8 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
     );
   };
 
-  const MapComp = demoMode() ? StaticMap : GoogleMap;
+  // Always use LeafletMap (free, no API charges) — StaticMap only shown in demo mode
+  const MapComp = demoMode() ? StaticMap : LeafletMap;
 
   return (
     <div>
@@ -1152,7 +1162,7 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
         />
         {demoMode() && (
           <div className="map-key-note">
-            Demo map — add a real <code style={{fontFamily:"var(--mono)",fontSize:9,background:"#f0ece0",padding:"1px 4px"}}>GOOGLE_MAPS_KEY</code> for the full interactive map with satellite/street view.
+            Demo mode — add real API keys to show live data.
           </div>
         )}
 
