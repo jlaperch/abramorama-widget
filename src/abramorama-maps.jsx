@@ -597,11 +597,24 @@ function LeafletMap({ screenings, userPos, onMarkerClick, activeId }) {
       markers.current.push(marker);
     });
 
-    // Fit bounds to all placed theaters
-    if(placed.length > 0) {
-      const bounds = L.latLngBounds(placed.map(s => [s.lat, s.lng]));
+    // Fit bounds — filter to reasonable geographic range to avoid outliers
+    // pulling the map to show the whole world (e.g. bad coordinates, Guam, etc.)
+    const inRange = placed.filter(s => {
+      // Continental US + Canada + Hawaii + reasonable outliers
+      // Exclude anything that would force a world view
+      const latOk = s.lat >= 15 && s.lat <= 72;
+      const lngOk = s.lng >= -170 && s.lng <= -50;
+      return latOk && lngOk;
+    });
+    const toFit = inRange.length > 0 ? inRange : placed;
+    if(toFit.length > 0) {
+      const bounds = L.latLngBounds(toFit.map(s => [s.lat, s.lng]));
       if(userPos) bounds.extend([userPos.lat, userPos.lng]);
-      mapObj.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 });
+      mapObj.current.fitBounds(bounds, { padding: [48, 48], maxZoom: 8 });
+      // Enforce minimum zoom — never show the whole world
+      mapObj.current.once("moveend", () => {
+        if(mapObj.current.getZoom() < 3) mapObj.current.setZoom(3);
+      });
     }
   }, [ready, screenings, userPos, activeId]);
 
