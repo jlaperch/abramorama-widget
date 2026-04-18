@@ -40,15 +40,6 @@ const DATA_RANGE  = "Screenings!A2:J";
 const HDR_RANGE   = "Screenings!A1:J1";
 const HDR_VALUES  = [["Theater","Address","City","State","ZIP","Start Date","End Date","Ticket URL","Lat","Lng"]];
 
-// Demo data shown before real credentials are wired up
-const DEMO = [
-  { id:"d1", theater:"IFC Center",        address:"323 Sixth Ave, New York, NY 10014",              startDate:"2026-04-04", endDate:"2026-04-17", ticketUrl:"https://ifccenter.com",         lat:40.7308,  lng:-74.0014,  _rowIndex:1 },
-  { id:"d2", theater:"Laemmle Royal",     address:"11523 Santa Monica Blvd, Los Angeles, CA 90025", startDate:"2026-04-11", endDate:"2026-04-24", ticketUrl:"https://laemmle.com",           lat:34.0499,  lng:-118.4481, _rowIndex:2 },
-  { id:"d3", theater:"Music Box Theatre", address:"3733 N Southport Ave, Chicago, IL 60613",        startDate:"2026-04-18", endDate:"2026-05-01", ticketUrl:"https://musicboxtheatre.com",   lat:41.9494,  lng:-87.6634,  _rowIndex:3 },
-  { id:"d4", theater:"SIFF Cinema Uptown",address:"511 Queen Anne Ave N, Seattle, WA 98109",        startDate:"2026-04-25", endDate:"2026-05-08", ticketUrl:"https://siff.net",              lat:47.6230,  lng:-122.3565, _rowIndex:4 },
-  { id:"d5", theater:"Alamo Drafthouse",  address:"320 E 3rd St, Austin, TX 78701",                 startDate:"2026-05-02", endDate:"2026-05-15", ticketUrl:"https://drafthouse.com",        lat:30.2626,  lng:-97.7404,  _rowIndex:5 },
-];
-
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,8 +169,6 @@ body{background:var(--ink);font-family:var(--serif)}
 .wcn{font-family:var(--serif);font-size:15px;font-weight:600;color:var(--ink);margin-bottom:3px}
 .wca{font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;line-height:1.55}
 .wcd{font-family:var(--mono);font-size:10px;color:var(--ink);margin-bottom:9px;padding:5px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
-.wcdist{font-family:var(--mono);font-size:9px;color:var(--gold);margin-bottom:8px}
-.wctkt{display:inline-block;background:var(--ink);color:white;font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;padding:6px 13px;text-decoration:none;transition:background .15s}
 .wctkt:hover{background:var(--gold)}
 .nbadge{position:absolute;top:10px;right:10px;background:var(--gold);color:var(--ink);font-family:var(--mono);font-size:8px;letter-spacing:.1em;padding:2px 7px;text-transform:uppercase}
 
@@ -209,7 +198,6 @@ const fmtDate = d => { if(!d) return "—"; const [,m,day]=d.split("-"); return 
 const status  = s => { const t=new Date().toISOString().slice(0,10); return s.endDate<t?"ended":s.startDate>t?"upcoming":"active"; };
 const haversineKm = (a,b,c,d) => { const R=6371,dL=(c-a)*Math.PI/180,dG=(d-b)*Math.PI/180,x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dG/2)**2; return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)); };
 const milesAway   = (a,b,c,d) => (haversineKm(a,b,c,d)*0.621371).toFixed(1);
-const demoMode    = () => GOOGLE_CLIENT_ID.startsWith("YOUR_") || GOOGLE_MAPS_KEY.startsWith("YOUR_");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GOOGLE MAPS LOADER
@@ -217,7 +205,6 @@ const demoMode    = () => GOOGLE_CLIENT_ID.startsWith("YOUR_") || GOOGLE_MAPS_KE
 let mapsPromise = null;
 function loadMaps() {
   if (mapsPromise) return mapsPromise;
-  if (demoMode()) { mapsPromise = Promise.reject(new Error("demo")); return mapsPromise; }
   mapsPromise = new Promise((resolve, reject) => {
     if (window.google?.maps?.places) { resolve(window.google.maps); return; }
     const cb = `_gmInit_${Date.now()}`;
@@ -232,7 +219,7 @@ function loadMaps() {
 }
 
 // Kick off Maps + Places load immediately on app start (needed for autocomplete)
-if (!demoMode()) loadMaps();
+loadMaps();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GEOCODING
@@ -242,17 +229,6 @@ async function geocodeAddress(address) {
   if (!address) return null;
   if (geocache[address]) return geocache[address];
   try {
-    if (demoMode()) {
-      // Nominatim fallback for demo mode
-      const r = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
-        { headers:{"Accept-Language":"en"} }
-      );
-      const d = await r.json();
-      if (!d.length) return null;
-      const g = { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
-      geocache[address] = g; return g;
-    }
     // Use Google Geocoding API — wait for Maps to be loaded first
     await loadMaps();
     return new Promise((resolve) => {
@@ -488,7 +464,6 @@ function useGoogleAuth() {
   }, [token]);
 
   useEffect(() => {
-    if(demoMode()) return;
     if(document.getElementById("gis")) { initClient(); return; }
     const s = document.createElement("script");
     s.id="gis"; s.src="https://accounts.google.com/gsi/client"; s.async=true;
@@ -644,90 +619,6 @@ function LeafletMap({ screenings, userPos, onMarkerClick, activeId }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STATIC FALLBACK MAP  (shown in demo mode)
-// ─────────────────────────────────────────────────────────────────────────────
-const B = { minLat:24,maxLat:50,minLng:-125,maxLng:-66 };
-function toP(lat,lng) {
-  return {
-    x: Math.max(2,Math.min(97,((lng-B.minLng)/(B.maxLng-B.minLng))*100)),
-    y: Math.max(3,Math.min(94,((B.maxLat-lat)/(B.maxLat-B.minLat))*100)),
-  };
-}
-const US_OUTLINE = "M60,78 L88,64 L138,56 L200,50 L262,48 L322,50 L372,54 L412,60 L444,70 L464,82 L470,100 L464,120 L448,134 L426,144 L398,150 L368,154 L338,157 L308,158 L278,157 L248,153 L218,146 L188,136 L162,124 L136,110 L110,96 L84,84 Z M60,78 L42,86 L36,100 L44,114 L58,120 L72,116 L76,102 L68,90 Z M378,158 L396,174 L410,186 L418,200 L410,212 L396,216 L382,212 L372,198 L368,182 Z";
-
-function StaticMap({ screenings, userPos, activeId, onMarkerClick }) {
-  const [tooltip, setTooltip] = useState(null);
-  const filtered = screenings.filter(s=>s.lat&&s.lng);
-  return (
-    <div className="map-wrap">
-      <div className="map-el" style={{position:"relative",overflow:"hidden",background:"#eae5d8",cursor:"default"}}>
-        {/* Light topo-style background */}
-        <svg viewBox="0 0 530 300" style={{position:"absolute",inset:0,width:"100%",height:"100%"}}>
-          <rect width="530" height="300" fill="#ddd8cc"/>
-          <path d={US_OUTLINE} fill="#e8e3d4" stroke="#b8b09a" strokeWidth="1.2"/>
-        </svg>
-
-        {/* Pins */}
-        {filtered.map(s => {
-          const p = toP(s.lat,s.lng);
-          const near = userPos && parseFloat(milesAway(userPos.lat,userPos.lng,s.lat,s.lng))<80;
-          const active = activeId===s.id;
-          return (
-            <div key={s.id}
-              onClick={()=>{ onMarkerClick(s.id); setTooltip(tooltip===s.id?null:s.id); }}
-              style={{
-                position:"absolute", left:`${p.x}%`, top:`${p.y}%`,
-                transform:`translate(-50%,-100%) scale(${active?1.2:1})`,
-                cursor:"pointer", zIndex:active?10:2, transition:"transform .15s",
-              }}>
-              <div style={{
-                width:13,height:13,borderRadius:"50% 50% 50% 0",transform:"rotate(-45deg)",
-                background:near?"#b8942a":"#8b1a1a",border:"2px solid white",
-                boxShadow:"0 2px 6px rgba(0,0,0,.32)",
-              }}/>
-              {tooltip===s.id && (
-                <div style={{
-                  position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",
-                  background:"#0d0d0d",color:"white",fontFamily:"var(--mono)",fontSize:9,
-                  padding:"6px 10px",whiteSpace:"nowrap",zIndex:20,letterSpacing:".1em",
-                  boxShadow:"0 4px 16px rgba(0,0,0,.4)",
-                }}>
-                  <div style={{fontFamily:"var(--serif)",fontSize:13,marginBottom:3}}>{s.theater}</div>
-                  <div style={{color:"#b8942a",marginBottom:4}}>{fmtDate(s.startDate)} – {fmtDate(s.endDate)}</div>
-                  {near && <div style={{color:"#b8942a",marginBottom:4}}>📍 {milesAway(userPos.lat,userPos.lng,s.lat,s.lng)} mi away</div>}
-                  <a href={s.ticketUrl} target="_blank" rel="noreferrer"
-                    style={{color:"#d4af5a",textDecoration:"none",fontSize:9,letterSpacing:".12em",textTransform:"uppercase"}}>
-                    Get Tickets →
-                  </a>
-                </div>
-              )}
-            </div>
-          );
-        })}
-
-        {/* User dot */}
-        {userPos && (() => {
-          const p = toP(userPos.lat,userPos.lng);
-          return (
-            <div style={{position:"absolute",left:`${p.x}%`,top:`${p.y}%`,transform:"translate(-50%,-50%)",zIndex:15}}>
-              <div style={{width:10,height:10,borderRadius:"50%",background:"#1a6ef5",border:"2px solid white",boxShadow:"0 0 0 4px rgba(26,110,245,.22)"}}/>
-            </div>
-          );
-        })()}
-
-        {/* Legend */}
-        <div style={{position:"absolute",bottom:8,right:10,fontFamily:"var(--mono)",fontSize:8,color:"#8a8278",letterSpacing:".08em",lineHeight:1.8}}>
-          <span style={{color:"#b8942a"}}>●</span> Near you &nbsp;<span style={{color:"#8b1a1a"}}>●</span> Other
-        </div>
-        <div style={{position:"absolute",bottom:8,left:10,fontFamily:"var(--mono)",fontSize:8,color:"#8a8278",letterSpacing:".08em"}}>
-          Demo map — click pins for details
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // COMPONENTS
 // ─────────────────────────────────────────────────────────────────────────────
 function Toast({ msg, isErr, onDone }) {
@@ -757,7 +648,7 @@ function SetupBanner() {
 function usePlacesAutocomplete(inputRef, onSelect) {
   const acRef = useRef(null);
   useEffect(() => {
-    if (!inputRef.current || demoMode()) return;
+    if (!inputRef.current) return;
     // Wait for Maps + Places to be ready before attaching autocomplete
     loadMaps().then(() => {
       if (!inputRef.current || acRef.current) return;
@@ -786,7 +677,7 @@ function usePlacesAutocomplete(inputRef, onSelect) {
           lng: place.geometry.location.lng(),
         });
       });
-    }).catch(() => {}); // silently skip in demo mode
+    }).catch(() => {});
     return () => {
       if (acRef.current) {
         window.google?.maps?.event.clearInstanceListeners(acRef.current);
@@ -897,7 +788,7 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
   const film = films[fi];
 
   const load = useCallback(async()=>{
-    if(demoMode()||!token) { setRows(DEMO.slice(0,3)); setSync("Demo data — connect Google to sync"); return; }
+    if(!token) { setRows([]); setSync("Sign in to sync."); return; }
     setLoading(true); setSync("Syncing…"); setSyncErr(false);
     try {
       await ensureHeader(token,film.sheetId);
@@ -910,10 +801,7 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
   useEffect(()=>{ load(); },[load]);
 
   const handleSave = async fd => {
-    if(demoMode()||!token){
-      setRows(p=>[...p,{...fd,id:`dm${Date.now()}`,_rowIndex:p.length+1}]);
-      setShowForm(false); toast("Added (demo — connect Google to persist)"); return;
-    }
+    if(!token){ toast("Sign in to save.",true); return; }
     setSaving(true);
     try {
       await sheetsAppend(token,film.sheetId,DATA_RANGE,[[fd.theater,fd.address,fd.city||"",fd.state||"",fd.zip||"",fd.startDate,fd.endDate,fd.ticketUrl,fd.lat||"",fd.lng||""]]);
@@ -923,7 +811,7 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
   };
 
   const handleDelete = async s => {
-    if(demoMode()||!token){ setRows(p=>p.filter(x=>x.id!==s.id)); toast("Removed (demo)."); return; }
+    if(!token){ toast("Sign in to delete.",true); return; }
     try {
       const meta = await fetch(`${SHEETS_BASE}/${film.sheetId}?fields=sheets.properties`,
         {headers:{Authorization:`Bearer ${token}`}}).then(r=>r.json());
@@ -938,7 +826,7 @@ function AdminView({ token, toast, films=FALLBACK_FILMS }) {
     <div>
       <div className="ph">
         <h1>Screening <em>Manager</em></h1>
-        <div className="ph-sub">Abramorama · Admin — {token?"Google Sheets live":"Demo mode"}</div>
+        <div className="ph-sub">Abramorama · Admin — {token?"Google Sheets live":"Not signed in"}</div>
       </div>
       <SetupBanner/>
       <div className="film-row">
@@ -1008,42 +896,21 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
     (async()=>{
       setLoading(true); setScreenings([]); setSheetError(null);
       let rows;
-      if(demoMode()){
-        rows=[...DEMO];
-      } else {
-        try{
-          rows=await readScreenings(token,film.sheetId);
-          if(rows.length===0) setSheetError("Sheet returned 0 rows — check the Screenings tab has data.");
-        } catch(e){
-          console.error("Sheet read failed:",e);
-          setSheetError(`Sheet read failed: ${e.message}. Check API key restrictions and Sheet sharing settings.`);
-          rows=[];
-        }
+      try{
+        rows=await readScreenings(token,film.sheetId);
+        if(rows.length===0) setSheetError("Sheet returned 0 rows — check the Screenings tab has data.");
+      } catch(e){
+        console.error("Sheet read failed:",e);
+        setSheetError(`Sheet read failed: ${e.message}. Check API key restrictions and Sheet sharing settings.`);
+        rows=[];
       }
       if(cancelled) return;
       setScreenings(rows); setLoading(false);
       // Only geocode rows that don't already have coordinates stored in the Sheet
       // Stored coordinates = zero API charges on page load
       const needsGeocode = rows.filter(s => !s.lat || !s.lng);
-      if(needsGeocode.length > 0 && !demoMode()) {
+      if(needsGeocode.length > 0) {
         // Use Nominatim (free) for geocoding remaining addresses — no API charge
-        const results = await Promise.all(
-          needsGeocode.map(s =>
-            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(s.address)}&limit=1`, {headers:{"Accept-Language":"en"}})
-              .then(r=>r.json())
-              .then(d => d.length ? {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon)} : null)
-              .catch(()=>null)
-          )
-        );
-        if(!cancelled) {
-          const geoMap = {};
-          needsGeocode.forEach((s, i) => { if(results[i]) geoMap[s.id] = results[i]; });
-          if(Object.keys(geoMap).length > 0) {
-            setScreenings(p => p.map(x => geoMap[x.id] ? {...x,...geoMap[x.id]} : x));
-          }
-        }
-      } else if(needsGeocode.length > 0 && demoMode()) {
-        // Demo mode — use Nominatim too (still free)
         const results = await Promise.all(
           needsGeocode.map(s =>
             fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(s.address)}&limit=1`, {headers:{"Accept-Language":"en"}})
@@ -1107,8 +974,8 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
     );
   };
 
-  // Always use LeafletMap (free, no API charges) — StaticMap only shown in demo mode
-  const MapComp = demoMode() ? StaticMap : LeafletMap;
+  // Always use LeafletMap (free, no API charges)
+  const MapComp = LeafletMap;
 
   return (
     <div>
@@ -1151,7 +1018,6 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
             <div>Sheet ID: <span style={{color:"white"}}>{film.sheetId}</span></div>
             <div>Token: <span style={{color:"white"}}>{token ? "✓ OAuth signed in" : "None (using API key)"}</span></div>
             <div>Screenings loaded: <span style={{color:"white"}}>{screenings.length}</span></div>
-            <div>Demo mode: <span style={{color:"white"}}>{demoMode() ? "YES — replace placeholder keys" : "No"}</span></div>
             <div>Sheet URL: <a href={`https://docs.google.com/spreadsheets/d/${film.sheetId}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Open Sheet ↗</a></div>
             <div>API test: <a href={`https://sheets.googleapis.com/v4/spreadsheets/${film.sheetId}/values/Screenings!A2:E?key=${GOOGLE_MAPS_KEY}`} target="_blank" rel="noreferrer" style={{color:"#b8942a"}}>Test API call ↗</a></div>
           </div>
@@ -1173,11 +1039,6 @@ function WidgetView({ token, toast, defaultFilmIdx=0, films=FALLBACK_FILMS }) {
           activeId={activeId}
           onMarkerClick={setActiveId}
         />
-        {demoMode() && (
-          <div className="map-key-note">
-            Demo mode — add real API keys to show live data.
-          </div>
-        )}
 
         {loading && (
           <div style={{textAlign:"center",padding:"28px 0",fontFamily:"var(--mono)",fontSize:11,letterSpacing:".15em",textTransform:"uppercase",color:"var(--muted)"}}>
@@ -1706,9 +1567,9 @@ export default function App() {
                   <button className="auth-btn sm" onClick={signOut}>Sign out</button>
                 </>
               ) : (
-                <button className="auth-btn" onClick={signIn} disabled={authLoading||demoMode()}>
+                <button className="auth-btn" onClick={signIn} disabled={authLoading}>
                   <span className="adot" style={{background:"var(--muted)"}}/>
-                  {authLoading?"Loading…":demoMode()?"Demo mode":"Connect Google"}
+                  {authLoading?"Loading…":"Connect Google"}
                 </button>
               )}
             </div>
